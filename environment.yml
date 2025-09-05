@@ -5,3 +5,9 @@ dependencies:
   - python=3.11
   - huggingface_hub[cli]
   - datasets
+  - python-dotenv
+  - langchain
+  - langchain-community
+  - langchain-openai
+  - pip:
+    - yandexcloud
