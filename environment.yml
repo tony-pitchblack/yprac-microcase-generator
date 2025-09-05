@@ -1,0 +1,7 @@
+name: ymg
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - huggingface_hub[cli]
+  - datasets
