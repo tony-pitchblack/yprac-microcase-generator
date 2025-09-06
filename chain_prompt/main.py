@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import argparse
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from langchain_community.llms.yandex import YandexGPT
@@ -38,7 +39,7 @@ def create_llm(provider):
     elif provider == 'openai':
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
         OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")  # Default model
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-5-nano")  # Default model
         
         if not OPENAI_API_KEY:
             raise ValueError("Не найден OPENAI_API_KEY в .env файле")
@@ -57,7 +58,7 @@ llm = create_llm(args.provider)
 
 # Print model information
 if args.provider == 'openai':
-    model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    model_name = os.getenv("OPENAI_MODEL", "openai/gpt-5-nano")
     print(f"Using OpenAI model: {model_name}")
 elif args.provider == 'yandex':
     model_name = os.getenv("YANDEX_MODEL", "yandexgpt-lite")
@@ -72,6 +73,19 @@ with open(os.path.join(script_dir, "review.txt"), "r", encoding="utf-8") as f:
 def load_prompt(path: str) -> str:
     with open(os.path.join(script_dir, path), "r", encoding="utf-8") as f:
         return f.read()
+
+# === Функция для логирования ===
+def setup_logging_dir():
+    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root_dir = os.path.dirname(script_dir)
+    log_dir = os.path.join(root_dir, "data", "chain_prompt", "logs", f"session_{session_timestamp}")
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+def save_response_to_log(log_dir, prompt_filename, response):
+    log_file = os.path.join(log_dir, f"{prompt_filename}_response.txt")
+    with open(log_file, "w", encoding="utf-8") as f:
+        f.write(response)
 
 extract_template = load_prompt("extract_prompt.txt")
 case_template = load_prompt("case_prompt.txt")
@@ -95,19 +109,23 @@ extract_chain = extract_prompt | llm | parser
 case_chain = case_prompt | llm | parser
 
 # Функция для выполнения полного pipeline
-def run_pipeline(review_text):
+def run_pipeline(review_text, log_dir):
     # Извлекаем ошибки
     errors = extract_chain.invoke({"review": review_text})
+    save_response_to_log(log_dir, "extract_prompt", errors)
     
     # Генерируем кейсы на основе ошибок
     cases = case_chain.invoke({"errors": errors})
+    save_response_to_log(log_dir, "case_prompt", cases)
     
     return {"errors": errors, "cases": cases}
 
 
 
 # === Запуск ===
-result = run_pipeline(review_text)
+log_dir = setup_logging_dir()
+result = run_pipeline(review_text, log_dir)
 
 print("Ошибки:\n", result["errors"])
 print("\nМикро-кейсы:\n", result["cases"])
+print(f"\nЛоги сохранены в: {log_dir}")

@@ -25,7 +25,7 @@ The script analyzes code review comments and:
 ```bash
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_BASE_URL=https://api.openai.com/v1  # Optional: custom endpoint
-OPENAI_MODEL=gpt-3.5-turbo  # Optional: model selection (default: gpt-3.5-turbo)
+OPENAI_MODEL=openai/gpt-5-nano  # Optional: model selection (default: openai/gpt-5-nano)
 ```
 
 #### Yandex Configuration
@@ -72,7 +72,7 @@ The script will output:
 
 Example output:
 ```
-Using OpenAI model: gpt-3.5-turbo
+Using OpenAI model: openai/gpt-5-nano
 Ошибки:
 [
   {
@@ -101,7 +101,7 @@ chain_prompt/
 You can specify different models using environment variables:
 
 ### OpenAI Models
-- `gpt-3.5-turbo` (default)
+- `openai/gpt-5-nano` (default)
 - `gpt-4`
 - `gpt-4-turbo`
 - Any other OpenAI model
