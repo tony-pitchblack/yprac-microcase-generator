@@ -1,5 +1,5 @@
 # Project-related
-# TODO
+tmp/
 
 # LLMs / agents
 .claude
