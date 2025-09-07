@@ -22,3 +22,8 @@ else
   echo "gitmodule 'data' already registered - downloading..."
   git submodule update --init
 fi
+
+# 5) download git lfs files if in data directory
+if [ -d data ]; then
+  (cd data && git lfs pull) || true
+fi
