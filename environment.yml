@@ -9,5 +9,6 @@ dependencies:
   - langchain
   - langchain-community
   - langchain-openai
+  - tiktoken
   - pip:
     - yandexcloud

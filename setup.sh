@@ -27,3 +27,8 @@ fi
 if [ -d data ]; then
   (cd data && git lfs pull) || true
 fi
+
+# 6) source project aliases for convenience
+if [ -f scripts/aliases.sh ]; then
+  source scripts/aliases.sh
+fi
