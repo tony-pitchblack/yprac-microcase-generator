@@ -40,7 +40,7 @@ def create_llm(provider):
     elif provider == 'openai':
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
         OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-120b")  # Default model
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "x-ai/grok-code-fast-1")  # Default model
         
         if not OPENAI_API_KEY:
             raise ValueError("Не найден OPENAI_API_KEY в .env файле")
@@ -127,7 +127,12 @@ def run_pipeline(review_text, log_dir):
 
     # Пытаемся распарсить JSON
     try:
-        language_info = json.loads(language_info_raw)
+        language_info_parsed = json.loads(language_info_raw)
+        # Если это массив, берем первый элемент
+        if isinstance(language_info_parsed, list) and len(language_info_parsed) > 0:
+            language_info = language_info_parsed[0]
+        else:
+            language_info = language_info_parsed
     except json.JSONDecodeError:
         language_info = {"language": "unknown", "type": "unknown"}
     
