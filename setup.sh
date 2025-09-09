@@ -7,7 +7,7 @@ set -euo pipefail
 # 1) install micromamba if not found in system
 if ! command -v micromamba >/dev/null 2>&1; then
   echo "micromamba not found — installing..."
-  bash <(curl -L micro.mamba.pm/install.sh)
+  bash <(curl -L micro.mamba.pm/install.sh) <<< $'\ny\ny\ny\n'
 else
   echo "micromamba found: $(command -v micromamba)"
 fi
@@ -28,7 +28,10 @@ if [ -d data ]; then
   (cd data && git lfs pull) || true
 fi
 
-# 6) source project aliases for convenience
+# 6) health-check size data folder
+du -sh ./data
+
+# 7) source project aliases for convenience
 if [ -f scripts/aliases.sh ]; then
   source scripts/aliases.sh
 fi
