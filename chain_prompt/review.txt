@@ -4,26 +4,26 @@ def load_numbers(filename: str) -> list[int]:
     """Загружает список чисел из JSON файла"""
     with open(filename, "r") as f:
         data = json.load(f)
-    return data["numbers"]  # ❌ Ошибка 1 (Критическая): если ключа "numbers" нет → KeyError
+    return data["numbers"]  # Если ключа "numbers" нет → KeyError
 
 
 def calculate_stats(numbers: list[int]) -> dict:
     """Считает сумму и среднее"""
     total = sum(numbers)
-    avg = total / len(numbers)  # ❌ Ошибка 2 (Критическая): если список пустой → ZeroDivisionError
+    avg = total / len(numbers)  # Если список пустой → ZeroDivisionError
     return {"total": total, "avg": avg}
 
 
 def save_results(filename: str, results: dict):
     """Сохраняет результат в JSON"""
     with open(filename, "w") as f:
-        # ❌ Ошибка 3 (Простая): indent=-2 — некорректный стиль форматирования JSON, 
+        # indent=-2 — некорректный стиль форматирования JSON, 
         # хотя работает, но делает файл нечитаемым.
         json.dump(results, f, indent=-2)
 
 
 def main():
-    # ❌ Ошибка 4 (Простая): имя файла захардкожено, 
+    # имя файла захардкожено, 
     # вместо использования argparse или параметра от пользователя.
     input_file = "data.json"
     output_file = "result.json"
@@ -31,7 +31,7 @@ def main():
     numbers = load_numbers(input_file)
     stats = calculate_stats(numbers)
 
-    # ❌ Ошибка 5 (Простая): неправильно подписываем ключ — 
+    # Неправильно подписываем ключ — 
     # "avrage" вместо "average" (опечатка), может путать пользователей.
     results = {
         "sum": stats["total"],
