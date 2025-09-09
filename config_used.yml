@@ -1,0 +1,34 @@
+expert:
+  context_add_rest: false
+  context_comment_margin: 50
+  context_max_symbols: 5000
+  max_attempts: 2
+models:
+  expert:
+    model_name: openai/gpt-5
+    provider: openai
+  preprocessor:
+    model_name: openai/gpt-3.5-turbo
+    provider: openai
+  student:
+    model_name: openai/gpt-3.5-turbo
+    provider: openai
+  tutor:
+    model_name: openai/gpt-4
+    provider: openai
+output:
+  base_output_dir: data/pytasksyn
+  session_prefix: session
+paths:
+  code_review_file: /Users/a1111/yprac-microcase-generator/data/backend/code_reviews/v0/manual/gpt-5/scrapy_parser_pep-main_short.csv
+  student_project: /Users/a1111/yprac-microcase-generator/tmp/data_unzipped/backend/scrapy_parser_pep-main
+stages:
+  skip_validation:
+  - t
+  - s
+student:
+  comprehension_threshold: 0.5
+  num_students: 20
+tutor:
+  acceptance_threshold: 0.5
+  max_solution_attempts: 2

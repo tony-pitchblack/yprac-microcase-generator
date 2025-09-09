@@ -10,5 +10,6 @@ dependencies:
   - langchain-community
   - langchain-openai
   - tiktoken
+  - pytest
   - pip:
     - yandexcloud

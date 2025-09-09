@@ -3,6 +3,7 @@
 
 # Project-related
 tmp/
+pytasksyn/config.yml
 
 # LLMs / agents
 .claude
