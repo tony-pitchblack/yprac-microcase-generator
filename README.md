@@ -1,5 +1,11 @@
 # yprac-microcase-generator
 
+# Team:
+- Anton Chernov. He was involved in creating integration with the yandexGPT api. He worked on the validation of the generated micro-cases.
+- Oblasov Sergei. He is engaged in the development of promts. He worked on the validation of the generated micro-cases.
+- Mikhail Lazarchik. He was engaged in Research, researched articles and approaches to the solution. He came up with ML System design.
+- Zakharov Daniil. He was selecting metrics. He was doing synthetic data generation.
+
 ## Setup
 
 ### Quick Setup
