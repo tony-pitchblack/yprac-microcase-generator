@@ -154,21 +154,46 @@ class ExpertStage:
             with open(tests_dir / "test_microcase.py", 'w', encoding='utf-8') as f:
                 f.write(tests)
             
-            # Generate expert solution
-            solution = self._generate_expert_solution(microcase, tests)
-            if not solution:
-                return False
-            
-            # Save solution
-            with open(attempt_dir / "solution_expert.py", 'w', encoding='utf-8') as f:
-                f.write(solution)
-            
-            # Verify solution passes tests
-            return self._verify_solution(attempt_dir, "solution_expert.py")
+            # --- Replace single solution generation with multiple attempts ---
+            # How many times to try generating a solution for this microcase within the same attempt:
+            solution_max_attempts = self.config.get('expert', {}).get('max_solution_attempts', 3)
+
+            last_solution_text = None
+            for sol_try in range(solution_max_attempts):
+                print(f"      Generating expert solution (attempt {sol_try + 1}/{solution_max_attempts})...")
+                solution = self._generate_expert_solution(microcase, tests)
+                if not solution:
+                    print("      Warning: Expert LLM returned empty solution, retrying...")
+                    continue
+
+                last_solution_text = solution
+                # Save (overwrite) solution file for this try
+                solution_path = attempt_dir / "solution_expert.py"
+                with open(solution_path, 'w', encoding='utf-8') as f:
+                    f.write(solution)
+
+                # Verify solution passes tests
+                print("      Verifying solution against tests...")
+                passed = self._verify_solution(attempt_dir, "solution_expert.py")
+                if passed:
+                    print("      Solution passed tests.")
+                    return True
+                else:
+                    print("      Solution did NOT pass tests, retrying solution generation...")
+                    # loop to regenerate solution again
+
+            # If we reach here — all solution generation attempts failed
+            print("      All solution generation attempts failed for this microcase attempt.")
+            # Optionally keep the last solution saved for inspection
+            if last_solution_text:
+                # ensure last attempt's solution is present (already written), or could save as failed_solution.py
+                (attempt_dir / "failed_solution_last.py").write_text(last_solution_text, encoding='utf-8')
+            return False
             
         except Exception as e:
             print(f"      Expert attempt failed: {e}")
             return False
+
     
     def _load_source_context(self, comment: Dict) -> str:
         """Load source context with embedded comments and apply limits"""

@@ -38,6 +38,9 @@ def parse_args():
     
     # Stage configuration
     parser.add_argument('--skip-val-stage', help='Skip validation stages: "t" (tutor), "s" (student), "st"/"ts" (both)')
+    # New explicit enable flags: by default tutor/student are DISABLED (isolated).
+    parser.add_argument('--enable-tutor', action='store_true', help='Enable tutor stage (disabled by default)')
+    parser.add_argument('--enable-student', action='store_true', help='Enable student stage (disabled by default)')
     
     # Expert settings
     parser.add_argument('--expert-max-attempts', type=int, help='Maximum attempts for expert stage')
@@ -54,7 +57,8 @@ def parse_args():
     parser.add_argument('--student-comprehension-threshold', type=float, help='Minimum pass ratio to accept microcase')
     
     return parser.parse_args()
-def load_config():
+
+def load_config(args=None):
     """Load and merge configuration from default, local, and CLI args"""
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
@@ -71,9 +75,18 @@ def load_config():
             local_config = yaml.safe_load(f)
         config = merge_configs(config, local_config)
     
-    # Override with CLI args
-    args = parse_args()
+    # Parse args if not provided
+    if args is None:
+        args = parse_args()
+    
+    # Apply CLI args to config
     config = apply_cli_overrides(config, args)
+    
+    # Ensure we have stage flags and set defaults: by default tutor/student stages are disabled (isolated)
+    config.setdefault('stages', {})
+    # If config already defines enable_tutor/enable_student, keep them unless CLI explicitly changed.
+    config['stages'].setdefault('enable_tutor', False)
+    config['stages'].setdefault('enable_student', False)
     
     # Validate required fields
     validate_config(config)
@@ -83,7 +96,8 @@ def load_config():
     with open(config_used_path, 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
     
-    return config, config_used_path
+    return config, config_used_path, args
+
 def merge_configs(base, override):
     """Recursively merge two configuration dictionaries"""
     result = base.copy()
@@ -93,6 +107,7 @@ def merge_configs(base, override):
         else:
             result[key] = value
     return result
+
 def apply_cli_overrides(config, args):
     """Apply CLI arguments to config"""
     # Model settings
@@ -119,14 +134,27 @@ def apply_cli_overrides(config, args):
     if args.code_review_file:
         config['paths']['code_review_file'] = args.code_review_file
     
-    # Stages
+    # Stages: parse skip flags
+    skip_stages = []
     if args.skip_val_stage:
-        skip_stages = []
         if 't' in args.skip_val_stage:
             skip_stages.append('t')
         if 's' in args.skip_val_stage:
             skip_stages.append('s')
+        config.setdefault('stages', {})
         config['stages']['skip_validation'] = skip_stages
+    
+    # Important: by default we keep tutor/student disabled (isolated).
+    # Enable only if CLI flag provided and not explicitly skipped.
+    config.setdefault('stages', {})
+    # If user passed --enable-tutor, enable unless explicitly skipped by skip_val_stage
+    if getattr(args, 'enable_tutor', False):
+        if 't' not in skip_stages:
+            config['stages']['enable_tutor'] = True
+    # If user passed --enable-student, enable unless explicitly skipped by skip_val_stage
+    if getattr(args, 'enable_student', False):
+        if 's' not in skip_stages:
+            config['stages']['enable_student'] = True
     
     # Expert settings
     if args.expert_max_attempts is not None:
@@ -151,6 +179,7 @@ def apply_cli_overrides(config, args):
         config['student']['comprehension_threshold'] = args.student_comprehension_threshold
     
     return config
+
 def validate_config(config):
     """Validate that required configuration fields are present"""
     required_fields = [
@@ -166,6 +195,7 @@ def validate_config(config):
             current = current[key]
         if not current:
             raise ValueError(f"Required config field {'.'.join(field_path)} is empty")
+
 def create_llm(model_config):
     """Create LLM instance based on configuration"""
     script_dir = Path(__file__).parent
@@ -206,6 +236,7 @@ def create_llm(model_config):
     
     else:
         raise ValueError(f"Unsupported provider: {provider}")
+
 def setup_session_directory(config):
     """Create session directory and copy config"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -221,10 +252,14 @@ def setup_session_directory(config):
         shutil.copy2(config_used_path, session_dir / "config_used.yml")
     
     return session_dir
+
 def main():
     try:
+        # Parse args once (we pass them into load_config to avoid double parsing)
+        args = parse_args()
+
         # Load configuration
-        config, config_used_path = load_config()
+        config, config_used_path, _ = load_config(args)
         
         # Setup session directory
         session_dir = setup_session_directory(config)
@@ -232,16 +267,26 @@ def main():
         # Create LLM instances
         preprocessor_llm = create_llm(config['models']['preprocessor'])
         expert_llm = create_llm(config['models']['expert'])
-        tutor_llm = create_llm(config['models']['tutor']) if 't' not in config['stages']['skip_validation'] else None
-        student_llm = create_llm(config['models']['student']) if 's' not in config['stages']['skip_validation'] else None
+        
+        # Tutor/Student LLMs and stages: create only if explicitly enabled in config (default: disabled)
+        tutor_llm = None
+        student_llm = None
+        if config.get('stages', {}).get('enable_tutor', False):
+            tutor_llm = create_llm(config['models']['tutor'])
+        if config.get('stages', {}).get('enable_student', False):
+            student_llm = create_llm(config['models']['student'])
         
         print(f"Session directory: {session_dir}")
         print(f"Preprocessor model: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
         print(f"Expert model: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
         if tutor_llm:
             print(f"Tutor model: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
+        else:
+            print("Tutor stage is DISABLED (use --enable-tutor to enable).")
         if student_llm:
             print(f"Student model: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
+        else:
+            print("Student stage is DISABLED (use --enable-student to enable).")
         
         # Initialize stages
         preprocessing_stage = PreprocessingStage(config, session_dir, preprocessor_llm)
@@ -260,11 +305,17 @@ def main():
         if tutor_stage:
             print("\n=== TUTOR STAGE ===")
             tutor_results = tutor_stage.run(expert_results)
+        else:
+            # tutor_results remains None — stage isolated
+            pass
         
         student_results = None
         if student_stage:
             print("\n=== STUDENT STAGE ===")
             student_results = student_stage.run(expert_results, tutor_results)
+        else:
+            # student_results remains None — stage isolated
+            pass
         
         # Generate final report
         print("\n=== GENERATING REPORT ===")
@@ -275,6 +326,7 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
 def generate_final_report(config, session_dir, expert_results, tutor_results, student_results):
     """Generate final script report"""
     report = []
@@ -322,5 +374,6 @@ def generate_final_report(config, session_dir, expert_results, tutor_results, st
     print(f"Total comments processed: {total_comments}")
     print(f"Accepted microcases: {accepted_comments}")
     print(f"Acceptance rate: {accepted_comments/total_comments*100:.1f}%")
+
 if __name__ == "__main__":
     main()
