@@ -91,8 +91,11 @@ async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
                     )
                     return
                 
+                event_type = 'message'
                 async for line in response.aiter_lines():
                     if not line.strip():
+                        continue
+                    if line.startswith(':'):
                         continue
                     
                     # Parse SSE format
@@ -100,7 +103,7 @@ async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
                         event_type = line[7:]
                     elif line.startswith('data: '):
                         try:
-                            data = json.loads(line[5:])
+                            data = json.loads(line[6:])
                             await handle_sse_event(event_type, data, user_id, bot)
                         except json.JSONDecodeError:
                             continue
@@ -138,11 +141,14 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             
         elif event_type == 'microcase':
             # New microcase received
+            # Ensure we always have a visible id for the UI
+            mc_visible_id = data.get('microcase_id') or (len(session['microcases']) + 1)
             microcase = {
-                'microcase_id': data.get('microcase_id'),
+                'microcase_id': int(mc_visible_id),
                 'file_path': data.get('file_path'),
                 'line_number': data.get('line_number'),
-                'comment': data.get('comment'),
+                'microcase': data.get('microcase') or data.get('comment'),
+                'review_comment': data.get('review_comment') or "",
                 'solution': data.get('solution')
             }
             
@@ -212,15 +218,15 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     mc_id = microcase.get("microcase_id") or microcase.get("id") or microcase.get("mc_id") or "<unknown-id>"
     file_path = microcase.get("file_path", "")
     line_number = microcase.get("line_number", "")
-    comment = microcase.get("comment", "")
+    body = microcase.get("microcase", "")
     
     txt_parts.append(f"📌 **Микрокейс #{mc_id}**")
     
     if file_path:
         txt_parts.append(f"📄 Файл: `{file_path}:{line_number}`")
     
-    if comment:
-        txt_parts.append(f"💬 Комментарий:\n{comment}")
+    if body:
+        txt_parts.append(f"📝 Микрокейс:\n{body}")
     else:
         # Fallback to old format
         desc = microcase.get("description") or microcase.get("prompt") or ""
@@ -231,7 +237,7 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     if instructions:
         txt_parts.append(f"📋 Инструкции:\n{instructions}")
     
-    txt_parts.append("➡️ **Отправьте ваше решение текстом в чат**")
+    txt_parts.append("➡️ Отправьте валидный Python-код решением (только код, без пояснений)")
     
     message_text = "\n\n".join(txt_parts)
     

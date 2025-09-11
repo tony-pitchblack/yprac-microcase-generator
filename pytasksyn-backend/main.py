@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import os
 import sys
@@ -12,6 +13,9 @@ from pathlib import Path
 import httpx
 import re
 from typing import Optional
+import asyncio
+import json
+import uuid
 
 # Load .env from root folder
 root_dir = Path(__file__).parent.parent
@@ -26,6 +30,13 @@ from pytasksyn.main import load_config, run_pipeline
 from pytasksyn.utils.logging_utils import init_logger, get_logger
 
 app = FastAPI()
+
+# Simple in-memory session storage for SSE
+SESSIONS: dict[str, asyncio.Queue] = {}
+DEV_MODE: bool = False
+
+def sse_format(event: str, data: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
 class GenerateMicrocaseRequest(BaseModel):
     url: str
@@ -170,10 +181,11 @@ async def create_review_csv_from_comments(comments: list, temp_dir: Path) -> Pat
     
     return csv_path
 
-@app.post("/gen-microcases/", status_code=200)
+@app.post("/gen-microcases/", status_code=202)
 async def generate_microcases(request: GenerateMicrocaseRequest):
     # Initialize logger for console output
-    logger = init_logger(console_output=True)
+    init_logger(console_output=True)
+    logger = get_logger()
     logger.info(f"Received request - URL: {request.url}, User ID: {request.user_id}")
     
     # Parse GitHub PR URL
@@ -208,16 +220,21 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         ]
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
+        # Dev mode: keep at most 1 comment to speed up iteration
+        if DEV_MODE and len(review_comments) > 1:
+            review_comments = review_comments[:1]
+            logger.info("DEV mode enabled: limiting review comments to 1")
+        
         if not review_comments:
             logger.warning("No review comments found with file paths - cannot generate microcases")
-            return {
+            return JSONResponse({
                 "message": "No review comments with file paths found",
                 "url": request.url,
                 "user_id": request.user_id,
                 "pr_info": {"owner": owner, "repo": repo, "pr_number": pr_number},
                 "total_comments": len(comments),
                 "review_comments": 0
-            }
+            }, status_code=202)
         
         # Setup session directory first
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -232,71 +249,130 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         await create_project_from_github(head_owner, head_repo, review_comments, project_dir, ref=head_sha or "HEAD")
         
         # Create temporary directory for CSV file
-        with tempfile.TemporaryDirectory() as temp_dir_str:
-            temp_dir = Path(temp_dir_str)
-            
-            # Create CSV from PR comments
-            review_csv = await create_review_csv_from_comments(review_comments, temp_dir)
-            
-            # Load pytasksyn configuration with paths
+        temp_dir_obj = tempfile.TemporaryDirectory()
+        temp_dir = Path(temp_dir_obj.name)
+        
+        # Create CSV from PR comments
+        review_csv = await create_review_csv_from_comments(review_comments, temp_dir)
+        
+        # Minimal config
+        config = {
+            'paths': {
+                'student_project': str(project_dir),
+                'code_review_file': str(review_csv)
+            },
+            'stages': {
+                'enable_tutor': False,
+                'enable_student': False
+            },
+            'models': {
+                'preprocessor': {'provider': 'yandex', 'model_name': 'yandexgpt-lite'},
+                'expert': {'provider': 'yandex', 'model_name': 'yandexgpt'}
+            },
+            'expert': {
+                'max_attempts': 2,
+                'context_max_symbols': 5000,
+                'context_comment_margin': 50,
+                'context_add_rest': False
+            },
+            'output': {
+                'session_prefix': 'session',
+                'base_output_dir': 'tmp/pytasksyn-backend'
+            }
+        }
+
+        # Create SSE session
+        session_id = uuid.uuid4().hex
+        queue: asyncio.Queue = asyncio.Queue()
+        SESSIONS[session_id] = queue
+
+        async def _producer():
+            init_logger(session_dir, console_output=True)
+            prod_logger = get_logger()
             try:
-                # Create minimal config instead of loading default (which has hardcoded paths)
-                config = {
-                    'paths': {
-                        'student_project': str(project_dir),
-                        'code_review_file': str(review_csv)
-                    },
-                    'stages': {
-                        'enable_tutor': False,
-                        'enable_student': False
-                    },
-                    'models': {
-                        'preprocessor': {'provider': 'yandex', 'model_name': 'yandexgpt-lite'},
-                        'expert': {'provider': 'yandex', 'model_name': 'yandexgpt'}
-                    },
-                    'expert': {
-                        'max_attempts': 2,
-                        'context_max_symbols': 5000,
-                        'context_comment_margin': 50,
-                        'context_add_rest': False
-                    },
-                    'output': {
-                        'session_prefix': 'session',
-                        'base_output_dir': 'tmp/pytasksyn-backend'
-                    }
-                }
-                
-                # Re-initialize logger with session directory
-                init_logger(session_dir, console_output=True)
-                logger = get_logger()
-                
-                logger.info("Starting pytasksyn pipeline with PR data")
-                
-                # Run the pipeline
-                results = run_pipeline(config, session_dir)
-                
-                # Return results
-                return {
-                    "message": "Microcase generation completed",
-                    "url": request.url,
-                    "user_id": request.user_id,
-                    "pr_info": {"owner": owner, "repo": repo, "pr_number": pr_number},
-                    "total_comments": len(comments),
-                    "review_comments": len(review_comments),
-                    "expert_results_count": len(results['expert_results']) if results['expert_results'] else 0,
-                    "successful_microcases": sum(1 for r in results['expert_results'].values() if r['success']) if results['expert_results'] else 0,
-                    "session_dir": str(results['session_dir'])
-                }
-                
+                await queue.put(("progress", {"message": "🚀 Запуск конвейера"}))
+                # Run pipeline in a thread to avoid blocking event loop
+                results = await asyncio.to_thread(run_pipeline, config, session_dir)
+
+                # Build mapping from comment_id to original text/line
+                dedup_file = session_dir / "preprocess" / "code_review_deduplicated.csv"
+                id_to_row = {}
+                try:
+                    import csv as _csv
+                    with open(dedup_file, 'r', encoding='utf-8') as f:
+                        reader = _csv.DictReader(f)
+                        for row in reader:
+                            try:
+                                cid = int(row.get('comment_id', '0'))
+                            except Exception:
+                                continue
+                            id_to_row[cid] = row
+                except Exception:
+                    pass
+
+                expert_results = results.get('expert_results') or {}
+                total_sent = 0
+                for cid, er in expert_results.items():
+                    if not er.get('success'):
+                        continue
+                    attempt_dir = Path(er['successful_attempt_dir'])
+                    mc_path = attempt_dir / "microcase.txt"
+                    try:
+                        mc_text = mc_path.read_text(encoding='utf-8')
+                    except Exception:
+                        mc_text = ""
+                    src_path = er.get('source_file_path')
+                    src_line = er.get('source_line_number')
+                    row = id_to_row.get(cid, {})
+                    review_comment = row.get('comment', '')
+                    await queue.put(("microcase", {
+                        "microcase_id": cid,
+                        "file_path": src_path,
+                        "line_number": src_line,
+                        "comment": mc_text or review_comment,
+                        "review_comment": review_comment,
+                        "solution": ""
+                    }))
+                    total_sent += 1
+
+                await queue.put(("complete", {"message": "Генерация завершена", "total_accepted": total_sent}))
             except Exception as e:
-                logger.error(f"Pipeline execution failed: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Pipeline execution failed: {str(e)}")
+                prod_logger.error(f"SSE producer failed: {e}")
+                await queue.put(("error", {"message": str(e)}))
+                await queue.put(("complete", {"message": "Завершено с ошибкой", "total_accepted": 0}))
+            finally:
+                try:
+                    temp_dir_obj.cleanup()
+                except Exception:
+                    pass
+
+        asyncio.create_task(_producer())
+        return JSONResponse({"session_id": session_id}, status_code=202)
         
     except HTTPException:
         raise  # Re-raise HTTP exceptions
     except Exception as e:
+        logger = get_logger()
         logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process request: {str(e)}")
+
+@app.get("/stream-microcases/{session_id}")
+async def stream_microcases(session_id: str):
+    queue = SESSIONS.get(session_id)
+    if not queue:
+        raise HTTPException(status_code=404, detail="Invalid session_id")
+
+    async def event_generator():
+        try:
+            while True:
+                event, data = await queue.get()
+                yield sse_format(event, data)
+                if event == "complete":
+                    break
+        finally:
+            SESSIONS.pop(session_id, None)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 def start_server_with_ngrok():
     from pyngrok import ngrok
@@ -325,7 +401,11 @@ def start_server():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
     parser.add_argument("--ngrok", action="store_true", help="Start server with ngrok tunnel")
+    parser.add_argument("--dev", action="store_true", help="Dev mode: limit to at most 1 comment")
     args = parser.parse_args()
+    
+    # Set global DEV flag
+    DEV_MODE = bool(getattr(args, "dev", False))
     
     if args.ngrok:
         start_server_with_ngrok()
