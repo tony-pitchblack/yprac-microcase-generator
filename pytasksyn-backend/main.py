@@ -472,18 +472,36 @@ async def check_microcase(request: CheckMicrocaseRequest):
         session_dir = ctx.get("session_dir")
         if not session_dir:
             raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
-        comment_dir = Path(session_dir) / f"comment_{mc_id_int}"
-        expert_output = comment_dir / "expert_output"
-        if expert_output.exists():
-            # Prefer attempts in descending order
-            attempt_dirs = sorted([
-                p for p in expert_output.glob("attempt_*") if (p / "tests" / "test_microcase.py").exists()
+
+        def _pick_attempt_from(comment_root: Path) -> Optional[str]:
+            expert_output_local = comment_root / "expert_output"
+            if not expert_output_local.exists():
+                return None
+            attempt_dirs_local = sorted([
+                p for p in expert_output_local.glob("attempt_*") if (p / "tests" / "test_microcase.py").exists()
             ], key=lambda p: p.name, reverse=True)
-            if attempt_dirs:
-                attempt_dir_str = str(attempt_dirs[0])
-                # Cache back into context for future requests
-                ctx.setdefault("microcase_attempt_dirs", {})[mc_id_int] = attempt_dir_str
+            if attempt_dirs_local:
+                return str(attempt_dirs_local[0])
+            return None
+
+        # 1) Try within recorded session_dir
+        attempt_dir_str = _pick_attempt_from(Path(session_dir) / f"comment_{mc_id_int}")
+
+        # 2) If not found, scan recent sessions under base tmp dir
         if not attempt_dir_str:
+            base_tmp = Path("tmp") / "pytasksyn-backend"
+            session_dirs = sorted([
+                p for p in base_tmp.glob("session_*") if p.is_dir()
+            ], key=lambda p: p.name, reverse=True)[:5]
+            for sess in session_dirs:
+                attempt_dir_str = _pick_attempt_from(sess / f"comment_{mc_id_int}")
+                if attempt_dir_str:
+                    break
+
+        if attempt_dir_str:
+            # Cache back into context for future requests
+            ctx.setdefault("microcase_attempt_dirs", {})[mc_id_int] = attempt_dir_str
+        else:
             raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
 
     success, out, err = _run_student_tests(Path(attempt_dir_str), request.solution)
