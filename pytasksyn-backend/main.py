@@ -6,6 +6,7 @@ import os
 import sys
 import csv
 import tempfile
+from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 import httpx
@@ -69,7 +70,7 @@ async def create_review_csv_from_comments(comments: list, temp_dir: Path) -> Pat
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         # Write header matching expected format
-        writer.writerow(['comment_id', 'file_path', 'line_number', 'comment_text', 'author'])
+        writer.writerow(['comment_id', 'file_path', 'line_number', 'comment', 'author'])
         
         comment_id = 1
         for comment in comments:
@@ -170,9 +171,10 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     }
                 }
                 
-                # Setup session directory in temp
-                session_dir = temp_dir / "session"
-                session_dir.mkdir()
+                # Setup session directory locally instead of in temp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                session_dir = Path("tmp") / f"session_{timestamp}"
+                session_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Re-initialize logger with session directory
                 init_logger(session_dir, console_output=True)
