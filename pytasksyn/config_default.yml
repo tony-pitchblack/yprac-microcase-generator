@@ -2,17 +2,17 @@
 # LLM Providers and Models
 models:
   preprocessor:
-    provider: "openai"  # "openai" or "yandex"
-    model_name: "openai/gpt-3.5-turbo"
+    provider: "yandex"  # "openai" or "yandex"
+    model_name: "yandexgpt-lite"
   expert:
-    provider: "openai"  # "openai" or "yandex"
-    model_name: "openai/gpt-5"
+    provider: "yandex"  # "openai" or "yandex"
+    model_name: "yandexgpt-lite"
   tutor:
-    provider: "openai"
-    model_name: "openai/gpt-4"
+    provider: "yandex"
+    model_name: "yandexgpt-lite"
   student:
-    provider: "openai"
-    model_name: "openai/gpt-3.5-turbo"
+    provider: "yandex"
+    model_name: "yandexgpt-lite"
 
 # Input/Output Paths
 paths:
