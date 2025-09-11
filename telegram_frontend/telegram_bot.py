@@ -294,7 +294,7 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_sessions(sessions)
     mc = microcases[idx]
     await query.edit_message_text(f"Выбран микрокейс #{mc.get('microcase_id')}. Пришлите решение кодом.")
-    await send_microcase_message_by_bot(context.bot, query.message.chat_id, mc)
+    await send_microcase_message_by_bot(context.bot, query.message.chat.id, mc)
 
 # --------------------
 # Хэндлеры
@@ -316,6 +316,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user_id = str(update.effective_user.id)
     sessions = load_sessions()
+    result_status = None
 
     # если это ссылка (репозиторий)
     if result_status == "passed" or result_status == "ok":
