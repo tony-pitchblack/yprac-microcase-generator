@@ -10,5 +10,10 @@ dependencies:
   - langchain-community
   - langchain-openai
   - tiktoken
+  - pytest
+  - uvicorn
+  - fastapi
+  - pydantic
   - pip:
     - yandexcloud
+    - pyngrok

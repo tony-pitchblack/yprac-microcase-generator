@@ -1,0 +1,46 @@
+# Default configuration for PyTaskSyn
+# LLM Providers and Models
+models:
+  preprocessor:
+    provider: "yandex"  # "openai" or "yandex"
+    model_name: "yandexgpt-lite"
+  expert:
+    provider: "yandex"  # "openai" or "yandex"
+    model_name: "yandexgpt-lite"
+  tutor:
+    provider: "yandex"
+    model_name: "yandexgpt-lite"
+  student:
+    provider: "yandex"
+    model_name: "yandexgpt-lite"
+
+# Input/Output Paths
+paths:
+  student_project: ""  # Path to student project root - REQUIRED
+  code_review_file: ""  # Path to code review CSV file - REQUIRED
+
+# Stage Configuration
+stages:
+  skip_validation: []  # List of stages to skip: "t" (tutor), "s" (student)
+
+# Expert Stage Settings
+expert:
+  max_attempts: 2
+  context_max_symbols: 5000
+  context_comment_margin: 50  # lines above/below comment, null for no limit
+  context_add_rest: false  # add files without comments to context
+
+# Tutor Stage Settings
+tutor:
+  max_solution_attempts: 2
+  acceptance_threshold: 0.5  # minimum score to accept microcase
+
+# Student Stage Settings
+student:
+  num_students: 20
+  comprehension_threshold: 0.5  # minimum pass ratio to accept microcase
+
+# Output Settings
+output:
+  session_prefix: "session"
+  base_output_dir: "data/pytasksyn"

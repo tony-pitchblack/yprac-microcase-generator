@@ -1,67 +1,50 @@
 # yprac-microcase-generator
 
-# Team:
-- Anton Chernov. He was involved in creating integration with the yandexGPT api. He worked on the validation of the generated micro-cases.
-- Oblasov Sergei. He is engaged in the development of promts. He worked on the validation of the generated micro-cases.
-- Mikhail Lazarchik. He was engaged in Research, researched articles and approaches to the solution. He came up with ML System design.
-- Zakharov Daniil. He was selecting metrics. He was doing synthetic data generation.
-
-## Setup
-
-### Quick Setup
-
-Run the automated setup script to install micromamba, create the environment, and download the dataset:
+### Установка
 
 ```bash
 ./setup.sh
 ```
 
-The script will automatically:
-- Install micromamba (if not already installed)
-- Create the `ymg` environment from `environment.yml`
-- Download the Hugging Face dataset via git submodules
+Используется micromamba для пакетов (env `ymg`).
 
-### Data Processing
+### 1) Создайте файл .env в корне
 
-To unzip and process data files, run:
+Минимально необходимое:
 
 ```bash
-./scripts/unzip_data.sh
+# Яндекс GPT (по умолчанию используется в backend)
+YANDEX_API_KEY=... 
+YANDEX_FOLDER_ID=...
+
+# Телеграм-бот (для фронтенда)
+BOT_TOKEN=...
+
+# Необязательно
+GITHUB_TOKEN=...        # повысит лимиты GitHub API
+BACKEND_URL=http://localhost:8000  # для бота; по умолчанию так
+NGROK_AUTHTOKEN=...     # если хотите туннель через ngrok
 ```
 
-This script will:
-- Process all files in the `data/` directory recursively
-- Unzip any `.zip` files directly to `tmp/data_unzipped/`
-- Copy non-zip files to the same directory
-- Handle various character encodings for zip files
-
-### Context Estimation
-
-Use the context estimation script to calculate text metrics for LLM context cost estimation:
+### 2) Поднять backend (FastAPI)
 
 ```bash
-# Estimate context for current directory
-./scripts/estimate_context.py .
-
-# Show directories at depth level 1 only
-./scripts/estimate_context.py . --depth 1
-
-# Show directories at depth level 2 only
-./scripts/estimate_context.py . --depth 2
-
-# Estimate specific directory
-./scripts/estimate_context.py /path/to/directory
-
-# Analyze backend projects and save to file
-micromamba activate ymg && ./scripts/estimate_context.py tmp/data_unzipped/backend/ --depth 1 >> data/estimate_context_backend.txt
-
-# Analyze frontend projects at depth 3 and save to file
-micromamba activate ymg && ./scripts/estimate_context.py tmp/data_unzipped/frontend/ --depth 3 >> data/estimate_context_frontend.txt
+micromamba activate ymg
+python pytasksyn-backend/main.py
 ```
 
-The script provides:
-- Total lines, characters, and accurate token counts using OpenAI's tiktoken
-- Characters per 1000 and tokens per 1000 (for cost estimation)
-- Table format showing leaf directories at the specified depth level only
-- Automatic text file detection (excludes binary files)
-- File-level counting within each leaf directory (no recursive aggregation)
+Опционально с ngrok-туннелем:
+
+```bash
+micromamba activate ymg
+python pytasksyn-backend/main.py --ngrok
+```
+
+### 3) Поднять фронт (Telegram-бот)
+
+```bash
+micromamba activate ymg
+python telegram_frontend/telegram_bot.py
+```
+
+Далее отправьте боту ссылку на GitHub PR (например, https://github.com/owner/repo/pull/123) — бот запросит backend и пришлёт микрокейсы.
