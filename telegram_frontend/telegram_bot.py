@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 from pathlib import Path
+import shutil
 from dotenv import load_dotenv
 import httpx
 from typing import Dict, List, Optional
@@ -30,23 +31,60 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден в .env")
 
-DATA_DIR = Path("data/backend")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-SESSIONS_FILE = DATA_DIR / "sessions.json"
+BASE_TMP = Path("tmp/telegram_frontend")
+BASE_TMP.mkdir(parents=True, exist_ok=True)
+USERS_INDEX = BASE_TMP / "users_index.json"
 
 # --------------------
-# Сессии: простая локальная персистенция
+# Сессии: локальная персистенция на пользователя/сессию (tmp/telegram_frontend)
 # --------------------
-def load_sessions():
-    if SESSIONS_FILE.exists():
-        try:
-            return json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+def _load_index():
+    try:
+        if USERS_INDEX.exists():
+            return json.loads(USERS_INDEX.read_text(encoding="utf-8"))
+    except Exception:
+        pass
     return {}
 
-def save_sessions(sessions):
-    SESSIONS_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+def _save_index(index: dict):
+    USERS_INDEX.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _session_dir(session_id: str) -> Path:
+    d = BASE_TMP / f"session_{session_id}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def load_user_session(user_id: str) -> dict:
+    index = _load_index()
+    session_id = index.get(user_id)
+    if not session_id:
+        return {}
+    fp = _session_dir(session_id) / "session.json"
+    try:
+        if fp.exists():
+            return json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def save_user_session(user_id: str, session: dict):
+    session_id = session.get("session_id")
+    if not session_id:
+        return
+    index = _load_index()
+    index[user_id] = session_id
+    _save_index(index)
+    (_session_dir(session_id) / "session.json").write_text(
+        json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+def delete_user_session(user_id: str):
+    index = _load_index()
+    session_id = index.pop(user_id, None)
+    _save_index(index)
+    # Keep session files for debugging; uncomment to remove
+    # if session_id:
+    #     shutil.rmtree(_session_dir(session_id), ignore_errors=True)
 
 # структура сессии по user_id (строка)
 # {
@@ -79,7 +117,7 @@ async def post_json(path: str, payload: dict, timeout=15):
 async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
     """Listen to SSE stream and update user session with incoming microcases."""
     url = f"{BACKEND_URL}/stream-microcases/{session_id}"
-    sessions = load_sessions()
+    # Note: session state is updated in handle_sse_event
     
     try:
         async with httpx.AsyncClient(timeout=600) as client:  # 10 minutes timeout
@@ -109,10 +147,10 @@ async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
                             continue
                         
     except Exception as e:
-        sessions = load_sessions()
-        if user_id in sessions:
-            sessions[user_id]['streaming'] = False
-            save_sessions(sessions)
+        sess = load_user_session(user_id)
+        if sess:
+            sess['streaming'] = False
+            save_user_session(user_id, sess)
         
         await bot.send_message(
             chat_id=int(user_id), 
@@ -121,12 +159,9 @@ async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
 
 async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
     """Handle different types of SSE events."""
-    sessions = load_sessions()
-    
-    if user_id not in sessions:
+    session = load_user_session(user_id)
+    if not session:
         return
-    
-    session = sessions[user_id]
     
     try:
         if event_type == 'progress':
@@ -206,7 +241,7 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
         print(f"Error handling SSE event: {e}")
     
     finally:
-        save_sessions(sessions)
+        save_user_session(user_id, session)
 
 
 # --------------------
@@ -271,11 +306,10 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     user_id = str(query.from_user.id)
-    sessions = load_sessions()
-    if user_id not in sessions:
+    session = load_user_session(user_id)
+    if not session:
         await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
         return
-    session = sessions[user_id]
     data = query.data or ""
     if not data.startswith("choose_mc:"):
         return
@@ -290,7 +324,7 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Микрокейс не найден.")
         return
     session['current'] = idx
-    save_sessions(sessions)
+    save_user_session(user_id, session)
     mc = microcases[idx]
     await query.edit_message_text(f"Выбран микрокейс #{mc.get('microcase_id')}. Пришлите решение кодом.")
     await send_microcase_message_by_bot(context.bot, query.message.chat_id, mc)
@@ -314,12 +348,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user_id = str(update.effective_user.id)
-    sessions = load_sessions()
+    session = load_user_session(user_id)
 
     # если это ссылка (репозиторий)
     if text.startswith("http"):
         # Check if user already has active streaming session
-        if user_id in sessions and sessions[user_id].get('streaming', False):
+        if session and session.get('streaming', False):
             await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
             return
             
@@ -337,7 +371,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # создаём сессию для streaming
-        sessions[user_id] = {
+        session = {
             "session_id": session_id,
             "microcases": [],
             "current": 0,
@@ -346,7 +380,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "streaming": True,
             "generation_complete": False
         }
-        save_sessions(sessions)
+        save_user_session(user_id, session)
 
         await update.message.reply_text(
             f"🚀 Началась генерация микрокейсов по PR `" + text + "` — ожидайте.",
@@ -361,11 +395,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # не ссылка: смотрим — есть ли активная сессия и ожидается ли ответ на микро-кейс
-    if user_id not in sessions:
+    if not session:
         await update.message.reply_text("Я не вижу активной сессии. Пришли ссылку на репозиторий (http...) чтобы начать.")
         return
-
-    session = sessions[user_id]
+    
     # если ждём ревью
     if session.get("awaiting_review"):
         review_text = text
@@ -379,8 +412,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         feedback = data.get("feedback") or data.get("comment") or data
         await update.message.reply_text(f"Оценка ревью: {score}\n\nКомментарий:\n{feedback}")
         # завершаем сессию
-        sessions.pop(user_id, None)
-        save_sessions(sessions)
+        delete_user_session(user_id)
         await update.message.reply_text("Сессия завершена. Если хочешь — пришли новую ссылку на репозиторий.")
         return
 
@@ -390,7 +422,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_index >= len(microcases):
         await update.message.reply_text("Все микро-кейсы уже обработаны. Напиши ревью (почему ты так решил).")
         session["awaiting_review"] = True
-        save_sessions(sessions)
+        save_user_session(user_id, session)
         return
 
     mc = microcases[current_index]
@@ -410,7 +442,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result_status == "passed" or result_status == "ok":
         session["solved"][current_index] = True
         session["current"] = current_index + 1
-        save_sessions(sessions)
+        save_user_session(user_id, session)
         await update.message.reply_text("✅ Автотесты пройдены! Переходим к следующему микро-кейсу.")
         # если есть следующий — отправляем
         if session["current"] < len(microcases):
@@ -448,8 +480,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # попытка поддержать отправку файла с кодом
     user_id = str(update.effective_user.id)
-    sessions = load_sessions()
-    if user_id not in sessions:
+    session = load_user_session(user_id)
+    if not session:
         await update.message.reply_text("Нет активной сессии. Пришли ссылку на репозиторий (http...) чтобы начать.")
         return
 
@@ -458,8 +490,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не могу прочитать файл.")
         return
 
-    # скачиваем файл во временный путь (в каталоге data/backend/tmp)
-    tmp_dir = DATA_DIR / "tmp"
+    # скачиваем файл во временный путь (в каталоге tmp/telegram_frontend/tmp)
+    tmp_dir = BASE_TMP / "tmp"
     tmp_dir.mkdir(exist_ok=True)
     file_path = tmp_dir / doc.file_name
     # загрузка файла

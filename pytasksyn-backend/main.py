@@ -343,13 +343,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     src_line = er.get('source_line_number')
                     row = id_to_row.get(cid, {})
                     review_comment = row.get('comment', '')
-                    # Update session context mapping for solution checking
-                    try:
-                        ctx = SESSION_CONTEXTS.get(request.user_id)
-                        if ctx is not None:
-                            ctx.setdefault("microcase_attempt_dirs", {})[int(cid)] = str(attempt_dir)
-                    except Exception:
-                        pass
+                    # Update session context mapping for solution checking (defer to report later)
 
                     await queue.put(("microcase", {
                         "microcase_id": cid,
@@ -466,45 +460,33 @@ async def check_microcase(request: CheckMicrocaseRequest):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid microcase_id")
 
-    attempt_dir_str = (ctx.get("microcase_attempt_dirs") or {}).get(mc_id_int)
+    # Always resolve attempt_dir via script_report.json to avoid stale caches
+    session_dir = ctx.get("session_dir")
+    if not session_dir:
+        raise HTTPException(status_code=409, detail="Session directory not available")
+    report_path = Path(session_dir) / "script_report.json"
+    if not report_path.exists():
+        raise HTTPException(status_code=409, detail="Report not available yet")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read report")
+
+    attempt_dir_str = None
+    for entry in report:
+        try:
+            if int(entry.get("comment_id")) == mc_id_int:
+                attempt_dir_str = entry.get("attempt_dir")
+                break
+        except Exception:
+            continue
     if not attempt_dir_str:
-        # Fallback: try to locate attempt dir on disk inside this session
-        session_dir = ctx.get("session_dir")
-        if not session_dir:
-            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+        raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
 
-        def _pick_attempt_from(comment_root: Path) -> Optional[str]:
-            expert_output_local = comment_root / "expert_output"
-            if not expert_output_local.exists():
-                return None
-            attempt_dirs_local = sorted([
-                p for p in expert_output_local.glob("attempt_*") if (p / "tests" / "test_microcase.py").exists()
-            ], key=lambda p: p.name, reverse=True)
-            if attempt_dirs_local:
-                return str(attempt_dirs_local[0])
-            return None
+    attempt_dir_path = Path(attempt_dir_str)
+    autotest_path = attempt_dir_path / "tests" / "test_microcase.py"
 
-        # 1) Try within recorded session_dir
-        attempt_dir_str = _pick_attempt_from(Path(session_dir) / f"comment_{mc_id_int}")
-
-        # 2) If not found, scan recent sessions under base tmp dir
-        if not attempt_dir_str:
-            base_tmp = Path("tmp") / "pytasksyn-backend"
-            session_dirs = sorted([
-                p for p in base_tmp.glob("session_*") if p.is_dir()
-            ], key=lambda p: p.name, reverse=True)[:5]
-            for sess in session_dirs:
-                attempt_dir_str = _pick_attempt_from(sess / f"comment_{mc_id_int}")
-                if attempt_dir_str:
-                    break
-
-        if attempt_dir_str:
-            # Cache back into context for future requests
-            ctx.setdefault("microcase_attempt_dirs", {})[mc_id_int] = attempt_dir_str
-        else:
-            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
-
-    success, out, err = _run_student_tests(Path(attempt_dir_str), request.solution)
+    success, out, err = _run_student_tests(attempt_dir_path, request.solution)
     if success:
         return {"status": "passed"}
 
@@ -512,7 +494,12 @@ async def check_microcase(request: CheckMicrocaseRequest):
     explanation = (out or err or "Tests failed").strip()
     if len(explanation) > 4000:
         explanation = explanation[-4000:]
-    return {"status": "failed", "explanation": explanation}
+    return {
+        "status": "failed",
+        "explanation": explanation,
+        "attempt_dir": str(attempt_dir_path),
+        "autotest_path": str(autotest_path)
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
