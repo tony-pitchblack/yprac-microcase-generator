@@ -1,4 +1,4 @@
-# bot.py
+#!/usr/bin/env python3
 import os
 import json
 import asyncio
@@ -160,12 +160,11 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
                 text=f"✅ Получен новый микрокейс! Всего: {len(session['microcases'])}"
             )
             
-            # If this is the first microcase and user is not currently solving one
+            # Always offer selection UI, even for a single microcase
+            await show_cases_list(bot, int(user_id), session)
+            # Additionally, if this is the very first microcase, also show its details immediately
             if len(session['microcases']) == 1 and session['current'] == 0:
                 await send_microcase_message_by_bot(bot, int(user_id), microcase)
-            else:
-                # Offer selection UI
-                await show_cases_list(bot, int(user_id), session)
                 
         elif event_type == 'complete':
             message = data.get('message', 'Генерация завершена')
@@ -324,7 +323,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
             return
             
-        await update.message.reply_text("🚀 Отправляю ссылку на backend для генерации микрокейсов...")
+        # concise flow: no pre-message
         
         # Start microcase generation with new API (returns 202 with session_id)
         status, data = await post_json("/gen-microcases/", {"url": text, "user_id": user_id})
@@ -350,9 +349,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_sessions(sessions)
 
         await update.message.reply_text(
-            f"✅ Генерация запущена!\n"
-            f"🆔 Session ID: `{session_id}`\n"
-            f"🔄 Ожидайте, микрокейсы будут приходить по мере готовности..."
+            f"🚀 Началась генерация микрокейсов по PR `" + text + "` — ожидайте.",
+            parse_mode='Markdown'
         )
 
         # Start SSE listener in background

@@ -12,10 +12,12 @@ from dotenv import load_dotenv
 from pathlib import Path
 import httpx
 import re
-from typing import Optional
+from typing import Optional, Union
 import asyncio
 import json
 import uuid
+import shutil
+import subprocess
 
 # Load .env from root folder
 root_dir = Path(__file__).parent.parent
@@ -33,7 +35,11 @@ app = FastAPI()
 
 # Simple in-memory session storage for SSE
 SESSIONS: dict[str, asyncio.Queue] = {}
-DEV_MODE: bool = False
+LIMIT_CASES: int = 2
+
+# In-memory mapping to track session context for solution checking
+# Keyed by user_id → { session_id, session_dir, microcase_attempt_dirs: {cid: attempt_dir} }
+SESSION_CONTEXTS: dict[str, dict] = {}
 
 def sse_format(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -41,6 +47,11 @@ def sse_format(event: str, data: dict) -> bytes:
 class GenerateMicrocaseRequest(BaseModel):
     url: str
     user_id: str
+
+class CheckMicrocaseRequest(BaseModel):
+    user_id: str
+    microcase_id: Union[int, str]
+    solution: str
 
 def parse_github_pr_url(url: str) -> Optional[tuple[str, str, str]]:
     """Parse GitHub PR URL to extract owner, repo, and PR number."""
@@ -220,10 +231,10 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         ]
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
-        # Dev mode: keep at most 1 comment to speed up iteration
-        if DEV_MODE and len(review_comments) > 1:
-            review_comments = review_comments[:1]
-            logger.info("DEV mode enabled: limiting review comments to 1")
+        # Limit number of review comments to process
+        if LIMIT_CASES and LIMIT_CASES > 0 and len(review_comments) > LIMIT_CASES:
+            review_comments = review_comments[:LIMIT_CASES]
+            logger.info(f"Limiting review comments to {LIMIT_CASES}")
         
         if not review_comments:
             logger.warning("No review comments found with file paths - cannot generate microcases")
@@ -286,11 +297,18 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         queue: asyncio.Queue = asyncio.Queue()
         SESSIONS[session_id] = queue
 
+        # Initialize session context for this user to enable solution checking later
+        SESSION_CONTEXTS[request.user_id] = {
+            "session_id": session_id,
+            "session_dir": str(session_dir),
+            "microcase_attempt_dirs": {}
+        }
+
         async def _producer():
             init_logger(session_dir, console_output=True)
             prod_logger = get_logger()
             try:
-                await queue.put(("progress", {"message": "🚀 Запуск конвейера"}))
+                await queue.put(("progress", {"message": "🚀 Запуск пайплайна генерации"}))
                 # Run pipeline in a thread to avoid blocking event loop
                 results = await asyncio.to_thread(run_pipeline, config, session_dir)
 
@@ -325,6 +343,14 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     src_line = er.get('source_line_number')
                     row = id_to_row.get(cid, {})
                     review_comment = row.get('comment', '')
+                    # Update session context mapping for solution checking
+                    try:
+                        ctx = SESSION_CONTEXTS.get(request.user_id)
+                        if ctx is not None:
+                            ctx.setdefault("microcase_attempt_dirs", {})[int(cid)] = str(attempt_dir)
+                    except Exception:
+                        pass
+
                     await queue.put(("microcase", {
                         "microcase_id": cid,
                         "file_path": src_path,
@@ -398,14 +424,86 @@ def start_server():
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
+
+def _run_student_tests(attempt_dir: Path, solution_code_text: str) -> tuple[bool, str, str]:
+    """Run pytest for student's solution against generated tests.
+
+    Writes student's code as solution_expert.py so tests can import it.
+    Returns (success, stdout, stderr).
+    """
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tests_dir = Path(attempt_dir) / "tests"
+            if not tests_dir.exists():
+                return False, "", "Tests directory not found"
+
+            # Write student's solution with expected module name
+            (tmp_path / "solution_expert.py").write_text(solution_code_text, encoding="utf-8")
+            # Copy tests
+            shutil.copytree(tests_dir, tmp_path / "tests")
+
+            # Run pytest
+            result = subprocess.run([
+                sys.executable, "-m", "pytest", "-q", "tests/"
+            ], cwd=tmp_path, capture_output=True, text=True)
+
+            return result.returncode == 0, result.stdout, result.stderr
+    except Exception as e:
+        return False, "", f"Error running tests: {e}"
+
+
+@app.post("/check-microcase/")
+async def check_microcase(request: CheckMicrocaseRequest):
+    # Find session context by user_id
+    ctx = SESSION_CONTEXTS.get(request.user_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="No active session for this user")
+
+    # Resolve attempt dir for given microcase id
+    try:
+        mc_id_int = int(request.microcase_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid microcase_id")
+
+    attempt_dir_str = (ctx.get("microcase_attempt_dirs") or {}).get(mc_id_int)
+    if not attempt_dir_str:
+        # Fallback: try to locate attempt dir on disk inside this session
+        session_dir = ctx.get("session_dir")
+        if not session_dir:
+            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+        comment_dir = Path(session_dir) / f"comment_{mc_id_int}"
+        expert_output = comment_dir / "expert_output"
+        if expert_output.exists():
+            # Prefer attempts in descending order
+            attempt_dirs = sorted([
+                p for p in expert_output.glob("attempt_*") if (p / "tests" / "test_microcase.py").exists()
+            ], key=lambda p: p.name, reverse=True)
+            if attempt_dirs:
+                attempt_dir_str = str(attempt_dirs[0])
+                # Cache back into context for future requests
+                ctx.setdefault("microcase_attempt_dirs", {})[mc_id_int] = attempt_dir_str
+        if not attempt_dir_str:
+            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+
+    success, out, err = _run_student_tests(Path(attempt_dir_str), request.solution)
+    if success:
+        return {"status": "passed"}
+
+    # On failure, provide brief explanation
+    explanation = (out or err or "Tests failed").strip()
+    if len(explanation) > 4000:
+        explanation = explanation[-4000:]
+    return {"status": "failed", "explanation": explanation}
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
     parser.add_argument("--ngrok", action="store_true", help="Start server with ngrok tunnel")
-    parser.add_argument("--dev", action="store_true", help="Dev mode: limit to at most 1 comment")
+    parser.add_argument("--limit-cases", type=int, default=2, help="Limit number of review comments to process")
     args = parser.parse_args()
     
-    # Set global DEV flag
-    DEV_MODE = bool(getattr(args, "dev", False))
+    # Set global limit
+    LIMIT_CASES = int(getattr(args, "limit_cases", 2))
     
     if args.ngrok:
         start_server_with_ngrok()
