@@ -11,7 +11,7 @@ from typing import Dict, Any
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from utils.logging_utils import get_logger
+from pytasksyn.utils.logging_utils import get_logger
 
 
 class ExpertStage:

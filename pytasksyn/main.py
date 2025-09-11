@@ -14,13 +14,13 @@ from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 
 # Import stages
-from stages.preprocessing import PreprocessingStage
-from stages.expert import ExpertStage
-from stages.tutor import TutorStage
-from stages.student import StudentStage
+from pytasksyn.stages.preprocessing import PreprocessingStage
+from pytasksyn.stages.expert import ExpertStage
+from pytasksyn.stages.tutor import TutorStage
+from pytasksyn.stages.student import StudentStage
 
 # Import logging utilities
-from utils.logging_utils import init_logger, get_logger
+from pytasksyn.utils.logging_utils import init_logger, get_logger
 
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTaskSyn - Generate microcases from code reviews')
