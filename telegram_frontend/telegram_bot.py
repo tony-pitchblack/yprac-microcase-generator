@@ -318,24 +318,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sessions = load_sessions()
 
     # если это ссылка (репозиторий)
-    if text.startswith("http"):
-        # Check if user already has active streaming session
-        if user_id in sessions and sessions[user_id].get('streaming', False):
-            await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
-            return
-            
-        await update.message.reply_text("🚀 Отправляю ссылку на backend для генерации микрокейсов...")
-        
-        # Start microcase generation with new API (returns 202 with session_id)
-        status, data = await post_json("/gen-microcases/", {"url": text, "user_id": user_id})
-        if status != 202:
-            await update.message.reply_text(f"❌ Ошибка от backend: HTTP {status}. Подробнее: {data}")
-            return
-
-        session_id = data.get("session_id")
-        if not session_id:
-            await update.message.reply_text("❌ Backend не вернул session_id")
-            return
+    if result_status == "passed" or result_status == "ok":
+        session["solved"][current_index] = True
+        save_sessions(sessions)
+        await update.message.reply_text("✅ Автотесты пройдены!")
+        # показать список кейсов для выбора следующего
+        await show_cases_list(context.bot, update.effective_chat.id, session)
+        # если все решены → ревью
+        if all(session["solved"]):
+            session["awaiting_review"] = True
+            save_sessions(sessions)
+            await update.message.reply_text(
+                "🎉 Ты решил все микро-кейсы! Напиши, пожалуйста, краткое ревью/пояснение: "
+                "почему ты так решил, что вынес из решения и т.п. Отправь текст в ответ."
+            )
+        return
 
         # создаём сессию для streaming
         sessions[user_id] = {
