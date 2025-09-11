@@ -17,9 +17,8 @@ root_dir = Path(__file__).parent.parent
 env_path = root_dir / ".env"
 load_dotenv(env_path)
 
-# Add pytasksyn to path for imports
-pytasksyn_path = root_dir / "pytasksyn"
-sys.path.insert(0, str(pytasksyn_path))
+# Add root directory to path for pytasksyn imports
+sys.path.insert(0, str(root_dir))
 
 # Import pytasksyn modules
 from pytasksyn.main import load_config, run_pipeline
