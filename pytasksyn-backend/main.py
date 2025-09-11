@@ -96,7 +96,47 @@ async def fetch_pr_details(owner: str, repo: str, pr_number: str) -> dict:
     async with httpx.AsyncClient() as client:
         response = await client.get(pr_url, headers=headers)
         if response.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Failed to fetch PR details: {response.status_code}")
+            # Build structured diagnostics for better troubleshooting (403, rate limits, scopes, SSO)
+            provider_message = None
+            documentation_url = None
+            provider_body_text = None
+            try:
+                err_json = response.json()
+                provider_message = err_json.get("message")
+                documentation_url = err_json.get("documentation_url")
+                provider_body_text = json.dumps(err_json)
+            except Exception:
+                try:
+                    provider_body_text = (response.text or "")
+                except Exception:
+                    provider_body_text = None
+
+            headers_lower = {k.lower(): v for k, v in response.headers.items()}
+            diagnostics = {
+                "message": "Failed to fetch PR details",
+                "provider_status": response.status_code,
+                "provider_message": provider_message,
+                "documentation_url": documentation_url,
+                "request_url": pr_url,
+                "token_present": bool(github_token),
+                "rate_limit": {
+                    "limit": headers_lower.get("x-ratelimit-limit"),
+                    "remaining": headers_lower.get("x-ratelimit-remaining"),
+                    "reset": headers_lower.get("x-ratelimit-reset"),
+                },
+                "oauth_scopes": headers_lower.get("x-oauth-scopes"),
+                "accepted_oauth_scopes": headers_lower.get("x-accepted-oauth-scopes"),
+                "sso": headers_lower.get("x-github-sso"),
+                "provider_body": (provider_body_text or "")[:1000] or None,
+            }
+            logger = get_logger()
+            try:
+                # Avoid logging large bodies
+                log_copy = {k: v for k, v in diagnostics.items() if k != "provider_body"}
+                logger.warning(f"PR details fetch failed: {json.dumps(log_copy, ensure_ascii=False)}")
+            except Exception:
+                logger.warning("PR details fetch failed (could not serialize diagnostics)")
+            raise HTTPException(status_code=502, detail=diagnostics)
         data = response.json()
         head = data.get("head", {})
         head_repo = head.get("repo") or {}
@@ -308,7 +348,6 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
             init_logger(session_dir, console_output=True)
             prod_logger = get_logger()
             try:
-                await queue.put(("progress", {"message": "🚀 Запуск пайплайна генерации"}))
                 # Run pipeline in a thread to avoid blocking event loop
                 results = await asyncio.to_thread(run_pipeline, config, session_dir)
 

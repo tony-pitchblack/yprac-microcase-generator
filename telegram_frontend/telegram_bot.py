@@ -190,16 +190,7 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             session['microcases'].append(microcase)
             session['solved'].append(False)
             
-            await bot.send_message(
-                chat_id=int(user_id), 
-                text=f"✅ Получен новый микрокейс! Всего: {len(session['microcases'])}"
-            )
-            
-            # Always offer selection UI, even for a single microcase
-            await show_cases_list(bot, int(user_id), session)
-            # Additionally, if this is the very first microcase, also show its details immediately
-            if len(session['microcases']) == 1 and session['current'] == 0:
-                await send_microcase_message_by_bot(bot, int(user_id), microcase)
+            # Do not notify or display list per microcase; wait until completion
                 
         elif event_type == 'complete':
             message = data.get('message', 'Генерация завершена')
@@ -221,9 +212,8 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
                     text=f"🎉 {message}\n\nВсего микрокейсов: {total_accepted}"
                 )
                 
-                # If no microcases have been sent yet, send the first one
-                if session['current'] == 0 and session['microcases']:
-                    await send_microcase_message_by_bot(bot, int(user_id), session['microcases'][0])
+                # Show selection list now that generation is complete
+                await show_cases_list(bot, int(user_id), session)
             
         elif event_type == 'error':
             error_message = data.get('message', 'Неизвестная ошибка')
