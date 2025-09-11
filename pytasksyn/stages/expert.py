@@ -11,6 +11,8 @@ from typing import Dict, Any
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+from utils.logging_utils import get_logger
+
 
 class ExpertStage:
     def __init__(self, config: Dict[str, Any], session_dir: Path, expert_llm):
@@ -21,11 +23,12 @@ class ExpertStage:
     
     def run(self, deduplicated_review_file: Path) -> Dict[int, Dict]:
         """Run the expert stage to generate microcases for each comment"""
-        print("Starting expert stage...")
+        logger = get_logger()
+        logger.processing("Starting expert stage")
         
         # Load deduplicated comments
         comments = self._load_comments(deduplicated_review_file)
-        print(f"Processing {len(comments)} deduplicated comments")
+        logger.info(f"Processing {len(comments)} deduplicated comments")
         
         # Embed comments into source files first
         self._embed_comments(deduplicated_review_file)
@@ -34,20 +37,20 @@ class ExpertStage:
         results = {}
         for comment in comments:
             comment_id = int(comment['comment_id'])
-            print(f"  Processing comment {comment_id}: {comment['file_path']}:{comment['line_number']}")
+            logger.processing(f"Processing comment {comment_id}: {comment['file_path']}:{comment['line_number']}")
             
             result = self._process_comment(comment)
             results[comment_id] = result
             
             if result['success']:
-                print(f"    ✓ Generated microcase after {result['attempts']} attempts")
+                logger.success(f"Generated microcase for comment {comment_id} after {result['attempts']} attempts")
             else:
-                print(f"    ✗ Failed to generate valid microcase after {result['attempts']} attempts")
+                logger.error(f"Failed to generate valid microcase for comment {comment_id} after {result['attempts']} attempts")
         
         # Print summary
         successful = sum(1 for r in results.values() if r['success'])
         total = len(results)
-        print(f"Expert stage completed: {successful}/{total} successful microcases")
+        logger.stage_complete("expert", {"successful": successful, "total": total})
         
         return results
     
@@ -61,7 +64,8 @@ class ExpertStage:
     
     def _embed_comments(self, review_file: Path):
         """Run embed_comments.py to create embedded source files"""
-        print("  Embedding comments into source files...")
+        logger = get_logger()
+        logger.processing("Embedding comments into source files")
         
         # Paths
         project_root = Path(self.config['paths']['student_project'])
@@ -77,16 +81,17 @@ class ExpertStage:
                 "--output-dir", str(embedded_dir)
             ], capture_output=True, text=True, check=True)
             
-            print(f"    Embedded source files created in: {embedded_dir}")
+            logger.success(f"Embedded source files created in: {embedded_dir}")
             
         except subprocess.CalledProcessError as e:
-            print(f"    Warning: Failed to embed comments: {e}")
-            print(f"    stdout: {e.stdout}")
-            print(f"    stderr: {e.stderr}")
+            logger.warning(f"Failed to embed comments: {e}")
+            # Log detailed error to file
+            logger.log('error', f"Embed comments failed - stdout: {e.stdout}, stderr: {e.stderr}", 'main', console_emoji=False)
             # Continue without embedded files
     
     def _process_comment(self, comment: Dict) -> Dict:
         """Process a single comment through the expert stage"""
+        logger = get_logger()
         comment_id = int(comment['comment_id'])
         comment_dir = self.session_dir / f"comment_{comment_id}"
         comment_dir.mkdir(exist_ok=True)
@@ -109,7 +114,12 @@ class ExpertStage:
             attempt_dir = comment_dir / "expert_output" / f"attempt_{attempt}"
             attempt_dir.mkdir(parents=True, exist_ok=True)
             
-            success = self._generate_microcase_attempt(comment, attempt_dir)
+            # Create attempt logger for detailed logging
+            attempt_logger = logger.create_attempt_logger(attempt_dir, attempt)
+            
+            logger.attempt_log(attempt + 1, max_attempts, f"Processing comment {comment_id}")
+            
+            success = self._generate_microcase_attempt(comment, attempt_dir, attempt_logger)
             
             end_time = time.time()
             duration = int(end_time - start_time)
@@ -119,7 +129,10 @@ class ExpertStage:
             if success:
                 result['success'] = True
                 result['successful_attempt_dir'] = str(attempt_dir)
+                logger.success(f"Comment {comment_id} succeeded on attempt {attempt + 1}")
                 break
+            else:
+                logger.warning(f"Comment {comment_id} attempt {attempt + 1} failed")
         
         # Calculate duration stats
         result['duration']['total'] = sum(result['duration']['attempts'])
@@ -128,25 +141,33 @@ class ExpertStage:
         
         return result
     
-    def _generate_microcase_attempt(self, comment: Dict, attempt_dir: Path) -> bool:
+    def _generate_microcase_attempt(self, comment: Dict, attempt_dir: Path, attempt_logger) -> bool:
         """Generate microcase, tests, and solution for one attempt"""
         try:
             # Load source context
             source_context = self._load_source_context(comment)
             
             # Generate microcase description
+            attempt_logger.log_generation("microcase description", "starting")
             microcase = self._generate_microcase_description(comment, source_context)
             if not microcase:
+                attempt_logger.log_generation("microcase description", "failed", "Empty response from LLM")
                 return False
+            
+            attempt_logger.log_generation("microcase description", "success")
             
             # Save microcase
             with open(attempt_dir / "microcase.txt", 'w', encoding='utf-8') as f:
                 f.write(microcase)
             
             # Generate test suite
+            attempt_logger.log_generation("test suite", "starting")
             tests = self._generate_test_suite(microcase)
             if not tests:
+                attempt_logger.log_generation("test suite", "failed", "Empty response from LLM")
                 return False
+            
+            attempt_logger.log_generation("test suite", "success")
             
             # Save tests
             tests_dir = attempt_dir / "tests"
@@ -154,16 +175,15 @@ class ExpertStage:
             with open(tests_dir / "test_microcase.py", 'w', encoding='utf-8') as f:
                 f.write(tests)
             
-            # --- Replace single solution generation with multiple attempts ---
-            # How many times to try generating a solution for this microcase within the same attempt:
+            # Multiple solution generation attempts
             solution_max_attempts = self.config.get('expert', {}).get('max_solution_attempts', 3)
 
             last_solution_text = None
             for sol_try in range(solution_max_attempts):
-                print(f"      Generating expert solution (attempt {sol_try + 1}/{solution_max_attempts})...")
+                attempt_logger.log_generation("expert solution", f"attempt {sol_try + 1}/{solution_max_attempts}")
                 solution = self._generate_expert_solution(microcase, tests)
                 if not solution:
-                    print("      Warning: Expert LLM returned empty solution, retrying...")
+                    attempt_logger.log_generation("expert solution", f"attempt {sol_try + 1} failed", "Empty response from LLM")
                     continue
 
                 last_solution_text = solution
@@ -173,25 +193,24 @@ class ExpertStage:
                     f.write(solution)
 
                 # Verify solution passes tests
-                print("      Verifying solution against tests...")
-                passed = self._verify_solution(attempt_dir, "solution_expert.py")
+                passed, test_stdout, test_stderr = self._verify_solution_detailed(attempt_dir, "solution_expert.py")
+                attempt_logger.log_test_run("solution_expert.py", test_stdout, test_stderr, 0 if passed else 1)
+                
                 if passed:
-                    print("      Solution passed tests.")
+                    attempt_logger.log_generation("expert solution", f"success on attempt {sol_try + 1}")
                     return True
                 else:
-                    print("      Solution did NOT pass tests, retrying solution generation...")
-                    # loop to regenerate solution again
+                    attempt_logger.log_generation("expert solution", f"attempt {sol_try + 1} failed tests")
 
             # If we reach here — all solution generation attempts failed
-            print("      All solution generation attempts failed for this microcase attempt.")
-            # Optionally keep the last solution saved for inspection
+            attempt_logger.log_generation("expert solution", "all attempts failed")
+            # Keep the last solution saved for inspection
             if last_solution_text:
-                # ensure last attempt's solution is present (already written), or could save as failed_solution.py
                 (attempt_dir / "failed_solution_last.py").write_text(last_solution_text, encoding='utf-8')
             return False
             
         except Exception as e:
-            print(f"      Expert attempt failed: {e}")
+            attempt_logger.error(f"Expert attempt failed: {e}")
             return False
 
     
@@ -423,6 +442,11 @@ Provide complete, valid Python solution code (implementation only, no tests):"""
     
     def _verify_solution(self, attempt_dir: Path, solution_filename: str) -> bool:
         """Verify that the solution passes all tests"""
+        passed, _, _ = self._verify_solution_detailed(attempt_dir, solution_filename)
+        return passed
+    
+    def _verify_solution_detailed(self, attempt_dir: Path, solution_filename: str) -> tuple[bool, str, str]:
+        """Verify that the solution passes all tests and return detailed output"""
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
@@ -432,7 +456,7 @@ Provide complete, valid Python solution code (implementation only, no tests):"""
                 tests_dir = attempt_dir / "tests"
                 
                 if not solution_file.exists() or not tests_dir.exists():
-                    return False
+                    return False, "", "Solution or tests directory not found"
                 
                 # Copy files
                 shutil.copy2(solution_file, temp_path / solution_filename)
@@ -444,13 +468,7 @@ Provide complete, valid Python solution code (implementation only, no tests):"""
                 ], cwd=temp_path, capture_output=True, text=True)
                 
                 success = result.returncode == 0
-                if not success:
-                    print(f"      Test failures:")
-                    print(f"        stdout: {result.stdout}")
-                    print(f"        stderr: {result.stderr}")
-                
-                return success
+                return success, result.stdout, result.stderr
                 
         except Exception as e:
-            print(f"      Error verifying solution: {e}")
-            return False
+            return False, "", f"Error verifying solution: {e}"

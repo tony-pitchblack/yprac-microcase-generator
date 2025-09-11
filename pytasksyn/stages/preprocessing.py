@@ -5,6 +5,8 @@ from pathlib import Path
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+from utils.logging_utils import get_logger
+
 
 class PreprocessingStage:
     def __init__(self, config, session_dir, preprocessor_llm):
@@ -15,7 +17,8 @@ class PreprocessingStage:
     
     def run(self):
         """Run the preprocessing stage to deduplicate comments"""
-        print("Starting preprocessing stage...")
+        logger = get_logger()
+        logger.processing("Starting preprocessing stage")
         
         preprocess_dir = self.session_dir / "preprocess"
         preprocess_dir.mkdir(exist_ok=True)
@@ -30,7 +33,7 @@ class PreprocessingStage:
         for i, comment in enumerate(comments):
             comment['comment_id'] = str(i)
         
-        print(f"Loaded {len(comments)} comments from {input_file}")
+        logger.info(f"Loaded {len(comments)} comments from {input_file}")
         
         # Deduplicate comments per file using LLM
         deduplicated_comments = self._deduplicate_comments(comments)
@@ -44,8 +47,11 @@ class PreprocessingStage:
                 writer.writeheader()
                 writer.writerows(deduplicated_comments)
         
-        print(f"Preprocessing complete. Deduplicated {len(comments)} -> {len(deduplicated_comments)} comments")
-        print(f"Deduplicated file saved to: {output_file}")
+        logger.stage_complete("preprocessing", {
+            "original_comments": len(comments),
+            "deduplicated_comments": len(deduplicated_comments)
+        })
+        logger.info(f"Deduplicated file saved to: {output_file}")
         
         return output_file
     

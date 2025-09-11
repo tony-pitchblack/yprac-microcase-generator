@@ -19,6 +19,9 @@ from stages.expert import ExpertStage
 from stages.tutor import TutorStage
 from stages.student import StudentStage
 
+# Import logging utilities
+from utils.logging_utils import init_logger, get_logger
+
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTaskSyn - Generate microcases from code reviews')
     
@@ -244,16 +247,14 @@ def setup_session_directory(config):
     
     return session_dir
 
-def main():
+def run_pipeline(config=None, session_dir=None):
+    """Run the pipeline - can be called externally or from main()"""
+    logger = get_logger()
+    
     try:
-        # Parse args once (we pass them into load_config to avoid double parsing)
-        args = parse_args()
-
-        # Load configuration
-        config, _ = load_config(args)
-        
-        # Setup session directory
-        session_dir = setup_session_directory(config)
+        # Setup session directory if not provided
+        if session_dir is None:
+            session_dir = setup_session_directory(config)
         
         # Create LLM instances
         preprocessor_llm = create_llm(config['models']['preprocessor'])
@@ -267,17 +268,17 @@ def main():
         if config.get('stages', {}).get('enable_student', False):
             student_llm = create_llm(config['models']['student'])
         
-        print(f"Session directory: {session_dir}")
-        print(f"Preprocessor model: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
-        print(f"Expert model: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
+        logger.info(f"Session directory: {session_dir}")
+        logger.info(f"Preprocessor model: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
+        logger.info(f"Expert model: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
         if tutor_llm:
-            print(f"Tutor model: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
+            logger.info(f"Tutor model: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
         else:
-            print("Tutor stage is DISABLED (use --enable-tutor to enable).")
+            logger.info("Tutor stage is DISABLED (use --enable-tutor to enable).")
         if student_llm:
-            print(f"Student model: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
+            logger.info(f"Student model: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
         else:
-            print("Student stage is DISABLED (use --enable-student to enable).")
+            logger.info("Student stage is DISABLED (use --enable-student to enable).")
         
         # Initialize stages
         preprocessing_stage = PreprocessingStage(config, session_dir, preprocessor_llm)
@@ -286,40 +287,64 @@ def main():
         student_stage = StudentStage(config, session_dir, student_llm) if student_llm else None
         
         # Execute pipeline
-        print("\n=== PREPROCESSING STAGE ===")
+        logger.stage_start("preprocessing")
         deduplicated_review_file = preprocessing_stage.run()
         
-        print("\n=== EXPERT STAGE ===")
+        logger.stage_start("expert")
         expert_results = expert_stage.run(deduplicated_review_file)
         
         tutor_results = None
         if tutor_stage:
-            print("\n=== TUTOR STAGE ===")
+            logger.stage_start("tutor")
             tutor_results = tutor_stage.run(expert_results)
-        else:
-            # tutor_results remains None — stage isolated
-            pass
         
         student_results = None
         if student_stage:
-            print("\n=== STUDENT STAGE ===")
+            logger.stage_start("student")
             student_results = student_stage.run(expert_results, tutor_results)
-        else:
-            # student_results remains None — stage isolated
-            pass
         
         # Generate final report
-        print("\n=== GENERATING REPORT ===")
+        logger.stage_start("report generation")
         generate_final_report(config, session_dir, expert_results, tutor_results, student_results)
         
-        print(f"\nPipeline completed. Results saved in: {session_dir}")
+        logger.success(f"Pipeline completed. Results saved in: {session_dir}")
+        
+        return {
+            'session_dir': session_dir,
+            'expert_results': expert_results,
+            'tutor_results': tutor_results,
+            'student_results': student_results
+        }
         
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Pipeline failed: {e}")
+        raise
+
+def main():
+    try:
+        # Parse args once (we pass them into load_config to avoid double parsing)
+        args = parse_args()
+
+        # Load configuration
+        config, _ = load_config(args)
+        
+        # Setup session directory
+        session_dir = setup_session_directory(config)
+        
+        # Initialize logger with session directory
+        init_logger(session_dir, console_output=True)
+        
+        # Run the pipeline
+        run_pipeline(config, session_dir)
+        
+    except Exception as e:
+        logger = get_logger()
+        logger.error(f"Pipeline failed: {e}")
         sys.exit(1)
 
 def generate_final_report(config, session_dir, expert_results, tutor_results, student_results):
     """Generate final script report"""
+    logger = get_logger()
     report = []
     
     for comment_id, expert_result in expert_results.items():
@@ -362,9 +387,9 @@ def generate_final_report(config, session_dir, expert_results, tutor_results, st
     # Print summary
     total_comments = len(report)
     accepted_comments = sum(1 for entry in report if entry['accepted'])
-    print(f"Total comments processed: {total_comments}")
-    print(f"Accepted microcases: {accepted_comments}")
-    print(f"Acceptance rate: {accepted_comments/total_comments*100:.1f}%")
+    logger.summary(f"Total comments processed: {total_comments}")
+    logger.summary(f"Accepted microcases: {accepted_comments}")
+    logger.summary(f"Acceptance rate: {accepted_comments/total_comments*100:.1f}%")
 
 if __name__ == "__main__":
     main()
