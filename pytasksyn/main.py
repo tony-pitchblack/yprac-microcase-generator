@@ -59,21 +59,17 @@ def parse_args():
     return parser.parse_args()
 
 def load_config(args=None):
-    """Load and merge configuration from default, local, and CLI args"""
+    """Load and merge configuration from config.yml and CLI args"""
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
     
-    # Load default config
-    default_config_path = script_dir / "config_default.yml"
-    with open(default_config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    # Always use pytasksyn/config.yml as the primary config
+    config_path = script_dir / "config.yml"
+    if not config_path.exists():
+        raise ValueError(f"Configuration file not found: {config_path}")
     
-    # Load local config if exists
-    local_config_path = script_dir / "config.yml"
-    if local_config_path.exists():
-        with open(local_config_path, 'r') as f:
-            local_config = yaml.safe_load(f)
-        config = merge_configs(config, local_config)
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
     
     # Parse args if not provided
     if args is None:
@@ -91,12 +87,7 @@ def load_config(args=None):
     # Validate required fields
     validate_config(config)
     
-    # Save used config to root and session
-    config_used_path = root_dir / "config_used.yml"
-    with open(config_used_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-    
-    return config, config_used_path, args
+    return config, args
 
 def merge_configs(base, override):
     """Recursively merge two configuration dictionaries"""
@@ -238,7 +229,7 @@ def create_llm(model_config):
         raise ValueError(f"Unsupported provider: {provider}")
 
 def setup_session_directory(config):
-    """Create session directory and copy config"""
+    """Create session directory and save config"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_name = f"{config['output']['session_prefix']}_{timestamp}"
     
@@ -246,10 +237,10 @@ def setup_session_directory(config):
     session_dir = root_dir / config['output']['base_output_dir'] / session_name
     session_dir.mkdir(parents=True, exist_ok=True)
     
-    # Copy config to session directory
-    config_used_path = root_dir / "config_used.yml"
-    if config_used_path.exists():
-        shutil.copy2(config_used_path, session_dir / "config_used.yml")
+    # Save the actual config used for this run to session directory
+    config_session_path = session_dir / "config_used.yml"
+    with open(config_session_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
     
     return session_dir
 
@@ -259,7 +250,7 @@ def main():
         args = parse_args()
 
         # Load configuration
-        config, config_used_path, _ = load_config(args)
+        config, _ = load_config(args)
         
         # Setup session directory
         session_dir = setup_session_directory(config)
