@@ -473,13 +473,15 @@ def _run_student_tests(attempt_dir: Path, solution_code_text: str) -> tuple[bool
 
             # Write student's solution with expected module name
             (tmp_path / "solution_expert.py").write_text(solution_code_text, encoding="utf-8")
-            # Copy tests
-            shutil.copytree(tests_dir, tmp_path / "tests")
 
-            # Run pytest
+            # Ensure pytest can import solution_expert from the temp dir
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{str(tmp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+            # Run pytest against the session tests directory
             result = subprocess.run([
                 sys.executable, "-m", "pytest", "-q", "tests/"
-            ], cwd=tmp_path, capture_output=True, text=True)
+            ], cwd=attempt_dir, env=env, capture_output=True, text=True)
 
             return result.returncode == 0, result.stdout, result.stderr
     except Exception as e:

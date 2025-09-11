@@ -460,27 +460,24 @@ def test_edge_cases():
     def _verify_solution_detailed(self, attempt_dir: Path, solution_filename: str) -> tuple[bool, str, str]:
         """Verify that the solution passes all tests and return detailed output"""
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-                
-                # Copy solution and tests to temp directory
-                solution_file = attempt_dir / solution_filename
-                tests_dir = attempt_dir / "tests"
-                
-                if not solution_file.exists() or not tests_dir.exists():
-                    return False, "", "Solution or tests directory not found"
-                
-                # Copy files
-                shutil.copy2(solution_file, temp_path / solution_filename)
-                shutil.copytree(tests_dir, temp_path / "tests")
-                
-                # Run pytest
-                result = subprocess.run([
-                    sys.executable, "-m", "pytest", "-v", "tests/"
-                ], cwd=temp_path, capture_output=True, text=True)
-                
-                success = result.returncode == 0
-                return success, result.stdout, result.stderr
+            # Ensure pytest can import solution module from attempt_dir
+            solution_file = attempt_dir / solution_filename
+            tests_dir = attempt_dir / "tests"
+            
+            if not solution_file.exists() or not tests_dir.exists():
+                return False, "", "Solution or tests directory not found"
+
+            env = os.environ.copy()
+            # Prepend attempt_dir to PYTHONPATH to import solution module
+            env["PYTHONPATH"] = f"{str(attempt_dir)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+            # Run pytest directly against tests in attempt_dir
+            result = subprocess.run([
+                sys.executable, "-m", "pytest", "-v", "tests/"
+            ], cwd=attempt_dir, env=env, capture_output=True, text=True)
+
+            success = result.returncode == 0
+            return success, result.stdout, result.stderr
                 
         except Exception as e:
             return False, "", f"Error verifying solution: {e}"

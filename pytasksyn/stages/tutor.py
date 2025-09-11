@@ -155,24 +155,23 @@ Focus on clarity and educational value:"""
     def _verify_tutor_solution(self, expert_attempt_dir: Path, tutor_solution_file: Path) -> bool:
         """Verify tutor solution passes the expert's test suite"""
         try:
+            expert_tests_dir = expert_attempt_dir / "tests"
+            if not tutor_solution_file.exists() or not expert_tests_dir.exists():
+                return False
+
+            # Make tutor solution available under expected name for tests
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                
-                # Copy tutor solution and expert tests
-                expert_tests_dir = expert_attempt_dir / "tests"
-                
-                if not tutor_solution_file.exists() or not expert_tests_dir.exists():
-                    return False
-                
-                # Copy files
-                shutil.copy2(tutor_solution_file, temp_path / "solution_tutor.py")
-                shutil.copytree(expert_tests_dir, temp_path / "tests")
-                
-                # Run pytest
+                alias_path = temp_path / "solution_expert.py"
+                alias_path.write_text(tutor_solution_file.read_text(encoding='utf-8'), encoding='utf-8')
+
+                env = os.environ.copy()
+                env["PYTHONPATH"] = f"{str(temp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
                 result = subprocess.run([
                     sys.executable, "-m", "pytest", "-v", "tests/"
-                ], cwd=temp_path, capture_output=True, text=True)
-                
+                ], cwd=expert_attempt_dir, env=env, capture_output=True, text=True)
+
                 return result.returncode == 0
                 
         except Exception as e:

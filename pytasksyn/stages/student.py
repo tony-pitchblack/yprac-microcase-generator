@@ -172,25 +172,28 @@ Write complete, working Python code that solves this problem:"""
     def _test_student_solution(self, solution_file: Path, expert_attempt_dir: Path) -> bool:
         """Test student solution against expert test suite"""
         try:
+            # Determine tests directory
+            expert_tests_dir = expert_attempt_dir / "tests"
+            if not solution_file.exists() or not expert_tests_dir.exists():
+                return False
+
+            # Expose student's module as solution_expert via PYTHONPATH
+            env = os.environ.copy()
+            solution_dir = solution_file.parent
+            # Create a symlink-like import by adding the student's dir and setting module name via file copy name
+            # Instead of copying, rely on pytest's import by PYTHONPATH and the tests importing from solution_expert
+            # We'll create a temporary alias file in the same directory to match expected import
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                
-                # Copy student solution and expert tests
-                expert_tests_dir = expert_attempt_dir / "tests"
-                
-                if not solution_file.exists() or not expert_tests_dir.exists():
-                    return False
-                
-                # Copy files with appropriate naming
-                solution_name = solution_file.name.replace("student_", "").replace("_solution", "")
-                shutil.copy2(solution_file, temp_path / solution_name)
-                shutil.copytree(expert_tests_dir, temp_path / "tests")
-                
-                # Run pytest with timeout to prevent hanging
+                alias_path = temp_path / "solution_expert.py"
+                alias_path.write_text(solution_file.read_text(encoding='utf-8'), encoding='utf-8')
+
+                env["PYTHONPATH"] = f"{str(temp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
                 result = subprocess.run([
                     sys.executable, "-m", "pytest", "-v", "--tb=short", "tests/"
-                ], cwd=temp_path, capture_output=True, text=True, timeout=30)
-                
+                ], cwd=expert_attempt_dir, env=env, capture_output=True, text=True, timeout=30)
+
                 return result.returncode == 0
                 
         except subprocess.TimeoutExpired:
