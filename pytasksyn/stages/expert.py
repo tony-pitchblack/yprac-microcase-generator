@@ -87,6 +87,7 @@ class ExpertStage:
             logger.warning(f"Failed to embed comments: {e}")
             # Log detailed error to file
             logger.log('error', f"Embed comments failed - stdout: {e.stdout}, stderr: {e.stderr}", 'main', console_emoji=False)
+            logger.log('debug', f"Embed script command: {[sys.executable, str(embed_script), '--review-file', str(review_file), '--project-root', str(project_root), '--output-dir', str(embedded_dir)]}", 'main', console_emoji=False)
             # Continue without embedded files
     
     def _process_comment(self, comment: Dict) -> Dict:
@@ -235,8 +236,13 @@ class ExpertStage:
                 with open(original_file, 'r', encoding='utf-8') as f:
                     content = f.read()
             except Exception as e:
-                print(f"      Warning: Could not read original file: {e}")
-                content = f"// File: {comment['file_path']}\\n// Could not load content: {e}"
+                logger = get_logger()
+                logger.warning(f"Could not read original file {original_file}: {e}")
+                # Create minimal content with enough lines to handle the comment
+                target_line = int(comment['line_number'])
+                lines = [f"// File: {comment['file_path']}"]
+                lines.extend([f"// Line {i} - could not load original content" for i in range(2, target_line + 5)])
+                content = "\\n".join(lines)
         
         # Apply context limits
         return self._apply_context_limits(content, comment)

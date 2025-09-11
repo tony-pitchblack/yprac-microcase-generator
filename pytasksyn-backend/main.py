@@ -130,14 +130,23 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
             project_dir = temp_dir / "mock_project"
             project_dir.mkdir()
             
-            # Create mock files mentioned in comments
+            # Create mock files mentioned in comments with sufficient content
+            file_max_lines = {}
+            # First pass: find max line number for each file
             for comment in review_comments:
                 file_path = comment['path']
+                line_num = int(comment['line'])
+                file_max_lines[file_path] = max(file_max_lines.get(file_path, 0), line_num)
+            
+            # Second pass: create files with enough lines
+            for file_path, max_line in file_max_lines.items():
                 mock_file = project_dir / file_path
                 mock_file.parent.mkdir(parents=True, exist_ok=True)
                 
-                # Create a simple mock file content
-                mock_content = f"# Mock file: {file_path}\n" + "\n".join([f"# Line {i}" for i in range(1, int(comment['line']) + 5)])
+                # Create mock content with enough lines (add buffer of 10 extra lines)
+                lines = [f"# Mock file: {file_path}"]
+                lines.extend([f"# Line {i} - placeholder content" for i in range(2, max_line + 11)])
+                mock_content = "\n".join(lines)
                 mock_file.write_text(mock_content, encoding='utf-8')
             
             # Create CSV from PR comments
@@ -173,7 +182,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                 
                 # Setup session directory locally instead of in temp
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                session_dir = Path("tmp") / f"session_{timestamp}"
+                session_dir = Path("tmp") / "pytasksyn-backend" / f"session_{timestamp}"
                 session_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Re-initialize logger with session directory

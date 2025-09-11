@@ -55,8 +55,10 @@ def embed_comments_in_file(source_file: str, comments: List[Dict], output_file: 
             lines = f.readlines()
     except (FileNotFoundError, UnicodeDecodeError) as e:
         print(f"Warning: Could not read {source_file}: {e}")
-        # Create a placeholder file
+        # Create a placeholder file with enough lines for the highest comment line number
+        max_line = max(comment['line_number'] for comment in comments)
         lines = [f"# Could not read original file: {e}\n"]
+        lines.extend([f"# Placeholder line {i}\n" for i in range(2, max_line + 10)])
     
     # Create output with embedded comments
     output_lines = []
@@ -70,18 +72,26 @@ def embed_comments_in_file(source_file: str, comments: List[Dict], output_file: 
             output_lines.append(lines[line_index])
             line_index += 1
         
+        # If we don't have enough lines in the source, pad with empty lines
+        while line_index < target_line - 1:
+            output_lines.append(f"# Generated line {line_index + 1}\n")
+            line_index += 1
+        
         # Add the comment block before the target line
+        comment_text = comment['comment'].replace('\n', '\n# ')  # Handle multi-line comments
         comment_block = [
             f"###### LINE {target_line} ################\n",
-            f"# {comment['comment']}\n",
+            f"# {comment_text}\n",
             "#####################################\n"
         ]
         output_lines.extend(comment_block)
         
-        # Add the target line if it exists
+        # Add the target line if it exists, or create a placeholder
         if line_index < len(lines):
             output_lines.append(lines[line_index])
-            line_index += 1
+        else:
+            output_lines.append(f"# Target line {target_line} (placeholder)\n")
+        line_index += 1
     
     # Add any remaining lines
     while line_index < len(lines):
