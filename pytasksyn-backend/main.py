@@ -96,7 +96,47 @@ async def fetch_pr_details(owner: str, repo: str, pr_number: str) -> dict:
     async with httpx.AsyncClient() as client:
         response = await client.get(pr_url, headers=headers)
         if response.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Failed to fetch PR details: {response.status_code}")
+            # Build structured diagnostics for better troubleshooting (403, rate limits, scopes, SSO)
+            provider_message = None
+            documentation_url = None
+            provider_body_text = None
+            try:
+                err_json = response.json()
+                provider_message = err_json.get("message")
+                documentation_url = err_json.get("documentation_url")
+                provider_body_text = json.dumps(err_json)
+            except Exception:
+                try:
+                    provider_body_text = (response.text or "")
+                except Exception:
+                    provider_body_text = None
+
+            headers_lower = {k.lower(): v for k, v in response.headers.items()}
+            diagnostics = {
+                "message": "Failed to fetch PR details",
+                "provider_status": response.status_code,
+                "provider_message": provider_message,
+                "documentation_url": documentation_url,
+                "request_url": pr_url,
+                "token_present": bool(github_token),
+                "rate_limit": {
+                    "limit": headers_lower.get("x-ratelimit-limit"),
+                    "remaining": headers_lower.get("x-ratelimit-remaining"),
+                    "reset": headers_lower.get("x-ratelimit-reset"),
+                },
+                "oauth_scopes": headers_lower.get("x-oauth-scopes"),
+                "accepted_oauth_scopes": headers_lower.get("x-accepted-oauth-scopes"),
+                "sso": headers_lower.get("x-github-sso"),
+                "provider_body": (provider_body_text or "")[:1000] or None,
+            }
+            logger = get_logger()
+            try:
+                # Avoid logging large bodies
+                log_copy = {k: v for k, v in diagnostics.items() if k != "provider_body"}
+                logger.warning(f"PR details fetch failed: {json.dumps(log_copy, ensure_ascii=False)}")
+            except Exception:
+                logger.warning("PR details fetch failed (could not serialize diagnostics)")
+            raise HTTPException(status_code=502, detail=diagnostics)
         data = response.json()
         head = data.get("head", {})
         head_repo = head.get("repo") or {}
@@ -308,7 +348,6 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
             init_logger(session_dir, console_output=True)
             prod_logger = get_logger()
             try:
-                await queue.put(("progress", {"message": "🚀 Запуск пайплайна генерации"}))
                 # Run pipeline in a thread to avoid blocking event loop
                 results = await asyncio.to_thread(run_pipeline, config, session_dir)
 
@@ -343,13 +382,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     src_line = er.get('source_line_number')
                     row = id_to_row.get(cid, {})
                     review_comment = row.get('comment', '')
-                    # Update session context mapping for solution checking
-                    try:
-                        ctx = SESSION_CONTEXTS.get(request.user_id)
-                        if ctx is not None:
-                            ctx.setdefault("microcase_attempt_dirs", {})[int(cid)] = str(attempt_dir)
-                    except Exception:
-                        pass
+                    # Update session context mapping for solution checking (defer to report later)
 
                     await queue.put(("microcase", {
                         "microcase_id": cid,
@@ -440,13 +473,15 @@ def _run_student_tests(attempt_dir: Path, solution_code_text: str) -> tuple[bool
 
             # Write student's solution with expected module name
             (tmp_path / "solution_expert.py").write_text(solution_code_text, encoding="utf-8")
-            # Copy tests
-            shutil.copytree(tests_dir, tmp_path / "tests")
 
-            # Run pytest
+            # Ensure pytest can import solution_expert from the temp dir
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{str(tmp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+
+            # Run pytest against the session tests directory
             result = subprocess.run([
                 sys.executable, "-m", "pytest", "-q", "tests/"
-            ], cwd=tmp_path, capture_output=True, text=True)
+            ], cwd=attempt_dir, env=env, capture_output=True, text=True)
 
             return result.returncode == 0, result.stdout, result.stderr
     except Exception as e:
@@ -466,45 +501,33 @@ async def check_microcase(request: CheckMicrocaseRequest):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid microcase_id")
 
-    attempt_dir_str = (ctx.get("microcase_attempt_dirs") or {}).get(mc_id_int)
+    # Always resolve attempt_dir via script_report.json to avoid stale caches
+    session_dir = ctx.get("session_dir")
+    if not session_dir:
+        raise HTTPException(status_code=409, detail="Session directory not available")
+    report_path = Path(session_dir) / "script_report.json"
+    if not report_path.exists():
+        raise HTTPException(status_code=409, detail="Report not available yet")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read report")
+
+    attempt_dir_str = None
+    for entry in report:
+        try:
+            if int(entry.get("comment_id")) == mc_id_int:
+                attempt_dir_str = entry.get("attempt_dir")
+                break
+        except Exception:
+            continue
     if not attempt_dir_str:
-        # Fallback: try to locate attempt dir on disk inside this session
-        session_dir = ctx.get("session_dir")
-        if not session_dir:
-            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+        raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
 
-        def _pick_attempt_from(comment_root: Path) -> Optional[str]:
-            expert_output_local = comment_root / "expert_output"
-            if not expert_output_local.exists():
-                return None
-            attempt_dirs_local = sorted([
-                p for p in expert_output_local.glob("attempt_*") if (p / "tests" / "test_microcase.py").exists()
-            ], key=lambda p: p.name, reverse=True)
-            if attempt_dirs_local:
-                return str(attempt_dirs_local[0])
-            return None
+    attempt_dir_path = Path(attempt_dir_str)
+    autotest_path = attempt_dir_path / "tests" / "test_microcase.py"
 
-        # 1) Try within recorded session_dir
-        attempt_dir_str = _pick_attempt_from(Path(session_dir) / f"comment_{mc_id_int}")
-
-        # 2) If not found, scan recent sessions under base tmp dir
-        if not attempt_dir_str:
-            base_tmp = Path("tmp") / "pytasksyn-backend"
-            session_dirs = sorted([
-                p for p in base_tmp.glob("session_*") if p.is_dir()
-            ], key=lambda p: p.name, reverse=True)[:5]
-            for sess in session_dirs:
-                attempt_dir_str = _pick_attempt_from(sess / f"comment_{mc_id_int}")
-                if attempt_dir_str:
-                    break
-
-        if attempt_dir_str:
-            # Cache back into context for future requests
-            ctx.setdefault("microcase_attempt_dirs", {})[mc_id_int] = attempt_dir_str
-        else:
-            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
-
-    success, out, err = _run_student_tests(Path(attempt_dir_str), request.solution)
+    success, out, err = _run_student_tests(attempt_dir_path, request.solution)
     if success:
         return {"status": "passed"}
 
@@ -512,7 +535,12 @@ async def check_microcase(request: CheckMicrocaseRequest):
     explanation = (out or err or "Tests failed").strip()
     if len(explanation) > 4000:
         explanation = explanation[-4000:]
-    return {"status": "failed", "explanation": explanation}
+    return {
+        "status": "failed",
+        "explanation": explanation,
+        "attempt_dir": str(attempt_dir_path),
+        "autotest_path": str(autotest_path)
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")

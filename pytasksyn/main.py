@@ -362,6 +362,11 @@ def generate_final_report(config, session_dir, expert_results, tutor_results, st
             "comment_id": comment_id,
             "source_file_path": expert_result['source_file_path'],
             "source_line_number": expert_result['source_line_number'],
+            # Where expert attempt artifacts are stored (tests, solution)
+            "attempt_dir": expert_result.get('successful_attempt_dir'),
+            # Convenience fields for locating autotests
+            "autotest_dir": str((Path(expert_result.get('successful_attempt_dir')) / "tests")) if expert_result.get('successful_attempt_dir') else None,
+            "autotest_path": str((Path(expert_result.get('successful_attempt_dir')) / "tests" / "test_microcase.py")) if expert_result.get('successful_attempt_dir') else None,
             "accepted": accepted,
             "pass_ratio": student_result['pass_ratio'] if student_result else None,
             "tutor_review": tutor_result['review'] if tutor_result else None,
