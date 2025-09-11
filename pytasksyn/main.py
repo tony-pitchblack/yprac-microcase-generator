@@ -351,8 +351,8 @@ def generate_final_report(config, session_dir, expert_results, tutor_results, st
         tutor_result = tutor_results.get(comment_id) if tutor_results else None
         student_result = student_results.get(comment_id) if student_results else None
         
-        # Determine acceptance
-        accepted = True
+        # Determine acceptance: base on expert success; tutor/student can veto
+        accepted = bool(expert_result.get('success', False))
         if tutor_result and not tutor_result.get('accepted', True):
             accepted = False
         if student_result and not student_result.get('accepted', True):

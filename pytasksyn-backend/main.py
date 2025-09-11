@@ -63,6 +63,27 @@ async def fetch_pr_comments(owner: str, repo: str, pr_number: str) -> list:
     
     return comments
 
+async def fetch_pr_details(owner: str, repo: str, pr_number: str) -> dict:
+    """Fetch PR details to obtain head repo info and SHA (supports forks)."""
+    github_token = os.getenv("GITHUB_TOKEN")
+    headers = {}
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+
+    pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
+    async with httpx.AsyncClient() as client:
+        response = await client.get(pr_url, headers=headers)
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch PR details: {response.status_code}")
+        data = response.json()
+        head = data.get("head", {})
+        head_repo = head.get("repo") or {}
+        return {
+            "head_owner": (head_repo.get("owner") or {}).get("login", owner),
+            "head_repo": head_repo.get("name", repo),
+            "head_sha": head.get("sha"),
+        }
+
 async def fetch_github_file_content(owner: str, repo: str, file_path: str, ref: str = "HEAD") -> str:
     """Fetch file content from GitHub repository"""
     github_token = os.getenv("GITHUB_TOKEN")
@@ -129,16 +150,23 @@ async def create_review_csv_from_comments(comments: list, temp_dir: Path) -> Pat
         
         comment_id = 1
         for comment in comments:
-            # Only include comments that have file path and line number (review comments)
-            if comment.get('path') and comment.get('line'):
-                writer.writerow([
-                    comment_id,
-                    comment['path'],
-                    comment['line'],
-                    comment.get('body', ''),
-                    comment.get('user', {}).get('login', 'Unknown')
-                ])
-                comment_id += 1
+            # Prefer original line fields; fallback to current line or range starts
+            if comment.get('path'):
+                line_number = (
+                    comment.get('original_line')
+                    or comment.get('line')
+                    or comment.get('original_start_line')
+                    or comment.get('start_line')
+                )
+                if line_number is not None:
+                    writer.writerow([
+                        comment_id,
+                        comment['path'],
+                        int(line_number),
+                        comment.get('body', ''),
+                        comment.get('user', {}).get('login', 'Unknown')
+                    ])
+                    comment_id += 1
     
     return csv_path
 
@@ -157,13 +185,27 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
     logger.info(f"Parsed PR info - Owner: {owner}, Repo: {repo}, PR: {pr_number}")
     
     try:
+        # Fetch PR details for head repo/sha (supports forks)
+        pr_details = await fetch_pr_details(owner, repo, pr_number)
+        head_owner = pr_details["head_owner"]
+        head_repo = pr_details["head_repo"]
+        head_sha = pr_details["head_sha"]
+
         # Fetch all comments from the PR
         comments = await fetch_pr_comments(owner, repo, pr_number)
         
         logger.info(f"Found {len(comments)} comments in PR #{pr_number}")
         
-        # Filter review comments (those with file path and line number)
-        review_comments = [c for c in comments if c.get('path') and c.get('line')]
+        # Filter review comments with usable line information
+        review_comments = [
+            c for c in comments
+            if c.get('path') and (
+                c.get('original_line') is not None
+                or c.get('line') is not None
+                or c.get('original_start_line') is not None
+                or c.get('start_line') is not None
+            )
+        ]
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
         if not review_comments:
@@ -182,12 +224,12 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         session_dir = Path("tmp") / "pytasksyn-backend" / f"session_{timestamp}"
         session_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create real project structure by fetching files from GitHub
+        # Create real project structure by fetching files from GitHub (at PR head SHA)
         project_dir = session_dir / "source_project"
         project_dir.mkdir()
         
-        # Fetch real files from GitHub repository
-        await create_project_from_github(owner, repo, review_comments, project_dir)
+        # Fetch real files from the PR head repository and commit
+        await create_project_from_github(head_owner, head_repo, review_comments, project_dir, ref=head_sha or "HEAD")
         
         # Create temporary directory for CSV file
         with tempfile.TemporaryDirectory() as temp_dir_str:
