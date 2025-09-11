@@ -23,41 +23,41 @@ from pytasksyn.stages.student import StudentStage
 from pytasksyn.utils.logging_utils import init_logger, get_logger
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='PyTaskSyn - Generate microcases from code reviews')
+    parser = argparse.ArgumentParser(description='PyTaskSyn — генерация микро-кейсов из обзоров кода')
     
     # Model configuration
-    parser.add_argument('--preprocessor-provider', choices=['yandex', 'openai'], help='LLM provider for preprocessor stage')
-    parser.add_argument('--preprocessor-model', help='Model name for preprocessor stage')
-    parser.add_argument('--expert-provider', choices=['yandex', 'openai'], help='LLM provider for expert stage')
-    parser.add_argument('--expert-model', help='Model name for expert stage')
-    parser.add_argument('--tutor-provider', choices=['yandex', 'openai'], help='LLM provider for tutor stage')
-    parser.add_argument('--tutor-model', help='Model name for tutor stage')
-    parser.add_argument('--student-provider', choices=['yandex', 'openai'], help='LLM provider for student stage')
-    parser.add_argument('--student-model', help='Model name for student stage')
+    parser.add_argument('--preprocessor-provider', choices=['yandex', 'openai'], help='Провайдер LLM для этапа препроцессинга')
+    parser.add_argument('--preprocessor-model', help='Название модели для этапа препроцессинга')
+    parser.add_argument('--expert-provider', choices=['yandex', 'openai'], help='Провайдер LLM для экспертного этапа')
+    parser.add_argument('--expert-model', help='Название модели для экспертного этапа')
+    parser.add_argument('--tutor-provider', choices=['yandex', 'openai'], help='Провайдер LLM для этапа наставника')
+    parser.add_argument('--tutor-model', help='Название модели для этапа наставника')
+    parser.add_argument('--student-provider', choices=['yandex', 'openai'], help='Провайдер LLM для этапа студента')
+    parser.add_argument('--student-model', help='Название модели для этапа студента')
     
     # Paths
-    parser.add_argument('--student-project', help='Path to student project root')
-    parser.add_argument('--code-review-file', help='Path to code review CSV file')
+    parser.add_argument('--student-project', help='Путь к корню учебного проекта')
+    parser.add_argument('--code-review-file', help='Путь к CSV с комментариями code review')
     
     # Stage configuration
-    parser.add_argument('--skip-val-stage', help='Skip validation stages: "t" (tutor), "s" (student), "st"/"ts" (both)')
+    parser.add_argument('--skip-val-stage', help='Пропустить этапы валидации: "t" (наставник), "s" (студент), "st"/"ts" (оба)')
     # New explicit enable flags: by default tutor/student are DISABLED (isolated).
-    parser.add_argument('--enable-tutor', action='store_true', help='Enable tutor stage (disabled by default)')
-    parser.add_argument('--enable-student', action='store_true', help='Enable student stage (disabled by default)')
+    parser.add_argument('--enable-tutor', action='store_true', help='Включить этап наставника (по умолчанию выключен)')
+    parser.add_argument('--enable-student', action='store_true', help='Включить этап студента (по умолчанию выключен)')
     
     # Expert settings
-    parser.add_argument('--expert-max-attempts', type=int, help='Maximum attempts for expert stage')
-    parser.add_argument('--expert-context-max-symbols', type=int, help='Maximum symbols in expert context')
-    parser.add_argument('--expert-context-comment-margin', type=int, help='Lines above/below comment for context')
-    parser.add_argument('--expert-context-add-rest', action='store_true', help='Add files without comments to context')
+    parser.add_argument('--expert-max-attempts', type=int, help='Максимум попыток для экспертного этапа')
+    parser.add_argument('--expert-context-max-symbols', type=int, help='Максимум символов в контексте эксперта')
+    parser.add_argument('--expert-context-comment-margin', type=int, help='Количество строк выше/ниже комментария для контекста')
+    parser.add_argument('--expert-context-add-rest', action='store_true', help='Добавлять файлы без комментариев в контекст')
     
     # Tutor settings
-    parser.add_argument('--tutor-max-solution-attempts', type=int, help='Maximum solution attempts for tutor stage')
-    parser.add_argument('--tutor-acceptance-threshold', type=float, help='Minimum score to accept microcase')
+    parser.add_argument('--tutor-max-solution-attempts', type=int, help='Максимум попыток решения для этапа наставника')
+    parser.add_argument('--tutor-acceptance-threshold', type=float, help='Минимальная оценка для принятия микро-кейса')
     
     # Student settings
-    parser.add_argument('--num-students', type=int, help='Number of simulated students')
-    parser.add_argument('--student-comprehension-threshold', type=float, help='Minimum pass ratio to accept microcase')
+    parser.add_argument('--num-students', type=int, help='Количество симулированных студентов')
+    parser.add_argument('--student-comprehension-threshold', type=float, help='Минимальная доля успешных, чтобы принять микро-кейс')
     
     return parser.parse_args()
 
@@ -69,7 +69,7 @@ def load_config(args=None):
     # Always use pytasksyn/config.yml as the primary config
     config_path = script_dir / "config.yml"
     if not config_path.exists():
-        raise ValueError(f"Configuration file not found: {config_path}")
+        raise ValueError(f"Файл конфигурации не найден: {config_path}")
     
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -185,10 +185,10 @@ def validate_config(config):
         current = config
         for key in field_path:
             if key not in current:
-                raise ValueError(f"Required config field {'.'.join(field_path)} is missing")
+                raise ValueError(f"Требуемое поле конфигурации {'.'.join(field_path)} отсутствует")
             current = current[key]
         if not current:
-            raise ValueError(f"Required config field {'.'.join(field_path)} is empty")
+            raise ValueError(f"Требуемое поле конфигурации {'.'.join(field_path)} пустое")
 
 def create_llm(model_config):
     """Create LLM instance based on configuration"""
@@ -204,7 +204,7 @@ def create_llm(model_config):
         folder_id = os.getenv("YANDEX_FOLDER_ID")
         
         if not api_key or not folder_id:
-            raise ValueError("YANDEX_API_KEY or YANDEX_FOLDER_ID not found in .env file")
+            raise ValueError("YANDEX_API_KEY или YANDEX_FOLDER_ID не найдены в файле .env")
         
         return YandexGPT(
             api_key=api_key,
@@ -217,7 +217,7 @@ def create_llm(model_config):
         base_url = os.getenv("OPENAI_BASE_URL")
         
         if not api_key:
-            raise ValueError("OPENAI_API_KEY not found in .env file")
+            raise ValueError("OPENAI_API_KEY не найден в файле .env")
         
         kwargs = {
             "api_key": api_key,
@@ -229,7 +229,7 @@ def create_llm(model_config):
         return ChatOpenAI(**kwargs)
     
     else:
-        raise ValueError(f"Unsupported provider: {provider}")
+        raise ValueError(f"Неподдерживаемый провайдер: {provider}")
 
 def setup_session_directory(config):
     """Create session directory and save config"""
@@ -268,17 +268,17 @@ def run_pipeline(config=None, session_dir=None):
         if config.get('stages', {}).get('enable_student', False):
             student_llm = create_llm(config['models']['student'])
         
-        logger.info(f"Session directory: {session_dir}")
-        logger.info(f"Preprocessor model: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
-        logger.info(f"Expert model: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
+        logger.info(f"Каталог сессии: {session_dir}")
+        logger.info(f"Модель препроцессинга: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
+        logger.info(f"Модель эксперта: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
         if tutor_llm:
-            logger.info(f"Tutor model: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
+            logger.info(f"Модель наставника: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
         else:
-            logger.info("Tutor stage is DISABLED (use --enable-tutor to enable).")
+            logger.info("Этап наставника ОТКЛЮЧЁН (используйте --enable-tutor, чтобы включить).")
         if student_llm:
-            logger.info(f"Student model: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
+            logger.info(f"Модель студента: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
         else:
-            logger.info("Student stage is DISABLED (use --enable-student to enable).")
+            logger.info("Этап студента ОТКЛЮЧЁН (используйте --enable-student, чтобы включить).")
         
         # Initialize stages
         preprocessing_stage = PreprocessingStage(config, session_dir, preprocessor_llm)
@@ -287,27 +287,27 @@ def run_pipeline(config=None, session_dir=None):
         student_stage = StudentStage(config, session_dir, student_llm) if student_llm else None
         
         # Execute pipeline
-        logger.stage_start("preprocessing")
+        logger.stage_start("препроцессинг")
         deduplicated_review_file = preprocessing_stage.run()
         
-        logger.stage_start("expert")
+        logger.stage_start("эксперт")
         expert_results = expert_stage.run(deduplicated_review_file)
         
         tutor_results = None
         if tutor_stage:
-            logger.stage_start("tutor")
+            logger.stage_start("наставник")
             tutor_results = tutor_stage.run(expert_results)
         
         student_results = None
         if student_stage:
-            logger.stage_start("student")
+            logger.stage_start("студент")
             student_results = student_stage.run(expert_results, tutor_results)
         
         # Generate final report
-        logger.stage_start("report generation")
+        logger.stage_start("генерация отчёта")
         generate_final_report(config, session_dir, expert_results, tutor_results, student_results)
         
-        logger.success(f"Pipeline completed. Results saved in: {session_dir}")
+        logger.success(f"Пайплайн завершён. Результаты сохранены в: {session_dir}")
         
         return {
             'session_dir': session_dir,
@@ -317,7 +317,7 @@ def run_pipeline(config=None, session_dir=None):
         }
         
     except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"Сбой пайплайна: {e}")
         raise
 
 def main():
@@ -339,7 +339,7 @@ def main():
         
     except Exception as e:
         logger = get_logger()
-        logger.error(f"Pipeline failed: {e}")
+        logger.error(f"Сбой пайплайна: {e}")
         sys.exit(1)
 
 def generate_final_report(config, session_dir, expert_results, tutor_results, student_results):
@@ -387,9 +387,9 @@ def generate_final_report(config, session_dir, expert_results, tutor_results, st
     # Print summary
     total_comments = len(report)
     accepted_comments = sum(1 for entry in report if entry['accepted'])
-    logger.summary(f"Total comments processed: {total_comments}")
-    logger.summary(f"Accepted microcases: {accepted_comments}")
-    logger.summary(f"Acceptance rate: {accepted_comments/total_comments*100:.1f}%")
+    logger.summary(f"Всего обработано комментариев: {total_comments}")
+    logger.summary(f"Принято микро-кейсов: {accepted_comments}")
+    logger.summary(f"Доля принятых: {accepted_comments/total_comments*100:.1f}%")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,22 @@
+{
+  "648516502": {
+    "session_id": "7d21e6d8d5884a91b62263be62375785",
+    "microcases": [
+      {
+        "microcase_id": 1,
+        "file_path": "pep_parse/settings.py",
+        "line_number": 3,
+        "microcase": "### Microcase: Using Constants for Configurations\n\n**Problem Statement:**\nIn a Python project, you are working on a settings file where various configurations are defined. One of the critical aspects of such a file is ensuring that all references to the project's main components are consistent and easily maintainable. You have been tasked with improving the settings file by utilizing constants to enhance code readability and maintainability.\n\n**Requirements:**\n1. Define a constant for the project's name at the beginning of the settings file.\n2. Use this constant to formulate the list for `SPIDER_MODULES` and set `NEWSPIDER_MODULE`.\n3. Ensure that any other module paths in the settings file (e.g., pipelines, spiders) also utilize this constant.\n4. The goal is to make the settings file more maintainable by centralizing the project name in one place.\n\n**Why this is important:**\nUsing constants for configurations makes the code more readable, maintainable, and less prone to errors. If the project name changes, it can be updated in one place, reducing the risk of missing a reference and causing bugs.",
+        "review_comment": "Используй константу с именем паука (ниже строка) для формирования списка.",
+        "solution": ""
+      }
+    ],
+    "current": 0,
+    "solved": [
+      false
+    ],
+    "awaiting_review": false,
+    "streaming": false,
+    "generation_complete": true
+  }
+}

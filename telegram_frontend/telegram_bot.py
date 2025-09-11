@@ -8,16 +8,16 @@ import httpx
 from typing import Dict, List, Optional
 import re
 
-# вместо requests.post
-from mock_backend import gen_microcases, check_solution, review_solution
+# HTTP backend is used via post_json helper below
 
-from telegram import Update, Bot
+from telegram import Update, Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
     ContextTypes,
+    CallbackQueryHandler,
 )
 
 # --------------------
@@ -163,6 +163,9 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             # If this is the first microcase and user is not currently solving one
             if len(session['microcases']) == 1 and session['current'] == 0:
                 await send_microcase_message_by_bot(bot, int(user_id), microcase)
+            else:
+                # Offer selection UI
+                await show_cases_list(bot, int(user_id), session)
                 
         elif event_type == 'complete':
             message = data.get('message', 'Генерация завершена')
@@ -246,6 +249,52 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     except Exception:
         # Fallback without markdown if parsing fails
         await bot.send_message(chat_id=chat_id, text=message_text)
+
+async def show_cases_list(bot: Bot, chat_id: int, session: dict):
+    buttons = []
+    for mc in session.get('microcases', []):
+        mc_id = mc.get('microcase_id')
+        fp = mc.get('file_path', '')
+        ln = mc.get('line_number', '')
+        label = f"#{mc_id} — {fp}:{ln}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc:{mc_id}")])
+    if not buttons:
+        return
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Выберите микрокейс для ответа:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user_id = str(query.from_user.id)
+    sessions = load_sessions()
+    if user_id not in sessions:
+        await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
+        return
+    session = sessions[user_id]
+    data = query.data or ""
+    if not data.startswith("choose_mc:"):
+        return
+    mc_id = data.split(":", 1)[1]
+    microcases = session.get('microcases', [])
+    idx = None
+    for i, mc in enumerate(microcases):
+        if str(mc.get('microcase_id')) == str(mc_id):
+            idx = i
+            break
+    if idx is None:
+        await query.edit_message_text("Микрокейс не найден.")
+        return
+    session['current'] = idx
+    save_sessions(sessions)
+    mc = microcases[idx]
+    await query.edit_message_text(f"Выбран микрокейс #{mc.get('microcase_id')}. Пришлите решение кодом.")
+    await send_microcase_message_by_bot(context.bot, query.message.chat_id, mc)
 
 # --------------------
 # Хэндлеры
@@ -369,6 +418,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session["current"] < len(microcases):
             next_mc = microcases[session["current"]]
             await send_microcase_message(update, next_mc)
+            await show_cases_list(context.bot, update.effective_chat.id, session)
         else:
             # все решены
             session["awaiting_review"] = True
@@ -450,6 +500,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc:"))
     # Документы (файлы с кодом)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Текстовые сообщения: ссылки и решения
