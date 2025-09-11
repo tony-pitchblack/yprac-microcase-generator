@@ -63,7 +63,7 @@ def parse_args():
 
 def load_config(args=None):
     """Load and merge configuration from config.yml and CLI args"""
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.resolve()
     root_dir = script_dir.parent
     
     # Always use pytasksyn/config.yml as the primary config

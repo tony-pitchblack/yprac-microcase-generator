@@ -144,11 +144,31 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
             
             # Load pytasksyn configuration with temporary paths
             try:
-                config, _ = load_config(None)  # Load default config
-                
-                # Override paths for this temporary run
-                config['paths']['student_project'] = str(project_dir)
-                config['paths']['code_review_file'] = str(review_csv)
+                # Create minimal config instead of loading default (which has hardcoded paths)
+                config = {
+                    'paths': {
+                        'student_project': str(project_dir),
+                        'code_review_file': str(review_csv)
+                    },
+                    'stages': {
+                        'enable_tutor': False,
+                        'enable_student': False
+                    },
+                    'models': {
+                        'preprocessor': {'provider': 'yandex', 'model_name': 'yandexgpt-lite'},
+                        'expert': {'provider': 'yandex', 'model_name': 'yandexgpt'}
+                    },
+                    'expert': {
+                        'max_attempts': 2,
+                        'context_max_symbols': 5000,
+                        'context_comment_margin': 50,
+                        'context_add_rest': False
+                    },
+                    'output': {
+                        'session_prefix': 'session',
+                        'base_output_dir': 'data/pytasksyn'
+                    }
+                }
                 
                 # Setup session directory in temp
                 session_dir = temp_dir / "session"
