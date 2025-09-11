@@ -273,26 +273,30 @@ class ExpertStage:
     
     def _generate_microcase_description(self, comment: Dict, source_context: str) -> str:
         """Generate microcase description using LLM"""
-        prompt_template = """Based on this code review comment and surrounding context, create a focused programming microcase that helps students learn from this mistake.
+        prompt_template = """        
+        На основе комментария к коду и окружающего его контекста создай учебный микро-кейс по программированию, который поможет студенту понять и исправить ошибку.
+Данные:
+1. Файл: {file_path}
+2. Строка: {line_number}
+3. Комментарий: {comment}
+4. Контекст кода: {source_context}
 
-File: {file_path}
-Line: {line_number}
-Comment: {comment}
+Требования к микро-кейсу:
 
-Context:
-{source_context}
+1. Показывает именно ту ошибку, о которой говорит комментарий.
+2. Объясняет основной принцип программирования, связанный с этой ошибкой.
+3. Решается в ограниченном объёме и логично.
+4. Может быть реализован в одном Python-файле.
+5. Содержит понятное описание задачи и требования.
+6. Не включай примеры кода или тесты — только описание задачи.
 
-Create a clear, educational microcase that:
-1. Demonstrates the specific issue mentioned in the comment
-2. Teaches the underlying programming principle  
-3. Is solvable in a focused way
-4. Can be implemented in a single Python file
-5. Includes a clear problem statement and requirements
 
-Format your response as a clear problem description that students can understand and implement.
-Do NOT include any code examples or test cases - only the problem description.
+Оформление к микро-кейсу:
+Название ошибки, на основе которого выделен микро кейсы должно писаться с верху и быть выделен жирным цветом.
+Далее должно быть описание микро кейсы.
 
-Microcase description:"""
+Описание микро-кейса:
+        """
         
         prompt = PromptTemplate(
             template=prompt_template,
@@ -311,22 +315,23 @@ Microcase description:"""
     
     def _generate_test_suite(self, microcase: str) -> str:
         """Generate pytest test suite for the microcase"""
-        prompt_template = """Based on this microcase, create a pytest test suite with valid Python code.
+        prompt_template = """На основе этого микро-кейса создайте тестовый набор с использованием pytest с корректным Python-кодом.
 
-Microcase:
+Микро-кейс:
 {microcase}
 
-Requirements:
-- Write ONLY valid Python code, no explanations
-- Start with necessary imports (pytest, standard library modules)
-- Import functions from solution_expert using: from solution_expert import function_name
-- Create test functions that verify the solution works correctly
-- Use descriptive test function names starting with "test_"
-- Include assertions to verify expected behavior
-- DO NOT define the functions being tested - only test them
+Требования:
 
-Example format:
-```python
+- Пишите ТОЛЬКО корректный Python-код, без объяснений
+- Начинайте с необходимых импортов (pytest и модули стандартной библиотеки)
+- Импортируйте функции из solution_expert с помощью: from solution_expert import function_name
+- Создавайте тестовые функции, проверяющие правильность работы решения
+- Используйте понятные имена тестовых функций, начинающиеся с test_
+- Включайте assertions для проверки ожидаемого поведения
+- НЕ определяйте тестируемые функции — только тестируйте их
+
+Пример формата:
+```
 import pytest
 from solution_expert import my_function
 
@@ -335,11 +340,11 @@ def test_basic_functionality():
     assert result == expected_value
 
 def test_edge_cases():
-    # test implementation  
+    # реализация теста
     assert True
 ```
 
-Provide complete, valid Python test code that imports from solution_expert:"""
+Предоставьте полный корректный Python-код тестов, импортирующий функции из solution_expert."""
         
         prompt = PromptTemplate(
             template=prompt_template,
@@ -353,24 +358,25 @@ Provide complete, valid Python test code that imports from solution_expert:"""
     
     def _generate_expert_solution(self, microcase: str, tests: str) -> str:
         """Generate expert solution for the microcase"""
-        prompt_template = """Based on this microcase and test suite, create a reference solution.
+        prompt_template = """На основе этого микро-кейса и набора тестов создайте эталонное решение.
 
-Microcase:
+Микро-кейс:
 {microcase}
 
-Test Suite:
+Набор тестов:
 {tests}
 
-Requirements:
-- Write ONLY valid Python code, no explanations or markdown
-- Include all necessary imports at the top
-- Create functions/classes as needed to solve the microcase
-- Ensure the code passes all the provided tests
-- Follow Python best practices
-- DO NOT include test functions in the solution
-- Only include the implementation functions that will be imported by the tests
+Требования:
 
-Provide complete, valid Python solution code (implementation only, no tests):"""
+- Пишите ТОЛЬКО корректный Python-код, без объяснений и markdown
+- Включите все необходимые импорты в начале
+- Создавайте функции/классы по необходимости для решения микро-кейса
+- Убедитесь, что код проходит все предоставленные тесты
+- Следуйте лучшим практикам Python
+- НЕ включайте тестовые функции в решение
+- Включайте только функции реализации, которые будут импортироваться тестами
+
+Предоставьте полный корректный Python-код решения (только реализация, без тестов):"""
         
         prompt = PromptTemplate(
             template=prompt_template,
