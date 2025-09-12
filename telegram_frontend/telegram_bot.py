@@ -209,7 +209,7 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             else:
                 await bot.send_message(
                     chat_id=int(user_id), 
-                    text=f"🎉 {message}\n\nВсего микрокейсов: {total_accepted}"
+                    text=f"⚙️ {message}.\n\nКоличество микрокейсов: {total_accepted}"
                 )
                 
                 # Show selection list now that generation is complete
@@ -267,12 +267,13 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     txt_parts.append("➡️ Отправьте валидный Python-код решением (только код, без пояснений)")
     
     message_text = "\n\n".join(txt_parts)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(text="⬅️ К списку", callback_data="back_to_list")]])
     
     try:
-        await bot.send_message(chat_id=chat_id, text=message_text, parse_mode='Markdown')
+        await bot.send_message(chat_id=chat_id, text=message_text, parse_mode='Markdown', reply_markup=keyboard)
     except Exception:
         # Fallback without markdown if parsing fails
-        await bot.send_message(chat_id=chat_id, text=message_text)
+        await bot.send_message(chat_id=chat_id, text=message_text, reply_markup=keyboard)
 
 async def show_cases_list(bot: Bot, chat_id: int, session: dict):
     buttons = []
@@ -286,7 +287,7 @@ async def show_cases_list(bot: Bot, chat_id: int, session: dict):
         return
     await bot.send_message(
         chat_id=chat_id,
-        text="Выберите микрокейс для ответа:",
+        text="Выберите микрокейс для решения:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -323,8 +324,59 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session['current'] = idx
     save_user_session(user_id, session)
     mc = microcases[idx]
-    await query.edit_message_text(f"Выбран микрокейс #{mc.get('microcase_id')}. Пришлите решение кодом.")
-    await send_microcase_message_by_bot(context.bot, query.message.chat_id, mc)
+    # Edit the list message into a microcase card (avoid extra message)
+    txt_parts = []
+    mc_id = mc.get("microcase_id") or mc.get("id") or mc.get("mc_id") or "<unknown-id>"
+    file_path = mc.get("file_path", "")
+    line_number = mc.get("line_number", "")
+    body = mc.get("microcase", "")
+
+    txt_parts.append(f"📌 **Микрокейс #{mc_id}**")
+    if file_path:
+        txt_parts.append(f"📄 Файл: `{file_path}:{line_number}`")
+    if body:
+        txt_parts.append(f"📝 Микрокейс:\n{body}")
+    else:
+        desc = mc.get("description") or mc.get("prompt") or ""
+        if desc:
+            txt_parts.append(f"📝 Описание:\n{desc}")
+    instructions = mc.get("instructions")
+    if instructions:
+        txt_parts.append(f"📋 Инструкции:\n{instructions}")
+    txt_parts.append("➡️ Отправьте валидный Python-код решением (только код, без пояснений)")
+
+    message_text = "\n\n".join(txt_parts)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(text="⬅️ К списку", callback_data="back_to_list")]])
+    try:
+        await query.edit_message_text(text=message_text, parse_mode='Markdown', reply_markup=keyboard)
+    except Exception:
+        await query.edit_message_text(text=message_text, reply_markup=keyboard)
+
+async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user_id = str(query.from_user.id)
+    session = load_user_session(user_id)
+    if not session:
+        await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
+        return
+    # Edit current message in-place to show the list (no extra messages)
+    buttons = []
+    for i, mc in enumerate(session.get('microcases', [])):
+        visible_no = i + 1
+        fp = mc.get('file_path', '')
+        ln = mc.get('line_number', '')
+        label = f"#{visible_no} — {fp}:{ln}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc_idx:{i}")])
+    if not buttons:
+        await query.edit_message_text("Нет доступных микрокейсов.")
+        return
+    await query.edit_message_text(
+        text="Выберите микрокейс для решения:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 # --------------------
 # Хэндлеры
@@ -445,7 +497,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session["current"] < len(microcases):
             next_mc = microcases[session["current"]]
             await send_microcase_message(update, next_mc)
-            await show_cases_list(context.bot, update.effective_chat.id, session)
         else:
             # все решены
             session["awaiting_review"] = True
@@ -528,6 +579,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc"))
+    app.add_handler(CallbackQueryHandler(handle_back_to_list, pattern="^back_to_list$"))
     # Документы (файлы с кодом)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Текстовые сообщения: ссылки и решения
