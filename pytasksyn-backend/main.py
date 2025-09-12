@@ -220,7 +220,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     },
                     'output': {
                         'session_prefix': 'session',
-                        'base_output_dir': 'data/pytasksyn'
+                        'base_output_dir': 'tmp/pytasksyn-backend'
                     }
                 }
                 
