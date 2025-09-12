@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import httpx
 from typing import Dict, List, Optional
 import re
+import hashlib
 
 # HTTP backend is used via post_json helper below
 
@@ -82,6 +83,11 @@ def delete_user_session(user_id: str):
     index = _load_index()
     session_id = index.pop(user_id, None)
     _save_index(index)
+    # Drop solved tracking for this user
+    try:
+        solved_cases.pop(user_id, None)
+    except Exception:
+        pass
     # Keep session files for debugging; uncomment to remove
     # if session_id:
     #     shutil.rmtree(_session_dir(session_id), ignore_errors=True)
@@ -100,6 +106,9 @@ def delete_user_session(user_id: str):
 # Глобальный словарь для хранения активных SSE соединений
 active_sse_tasks: Dict[str, asyncio.Task] = {}
 
+# Tracking solved microcases per user_id
+solved_cases: Dict[str, set] = {}
+
 # --------------------
 # HTTP helper
 # --------------------
@@ -113,6 +122,44 @@ async def post_json(path: str, payload: dict, timeout=15):
         except Exception:
             data = {"_raw_text": resp.text}
         return resp.status_code, data
+
+# --------------------
+# Cache helpers
+# --------------------
+def _hash_pr_url(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+def _cached_root_for_url(url: str) -> Path:
+    pr_hash = _hash_pr_url(url)
+    return Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+
+def load_cached_microcases(pr_url: str) -> List[dict]:
+    root = _cached_root_for_url(pr_url)
+    if not root.exists():
+        return []
+    microcases: List[dict] = []
+    try:
+        for d in sorted(root.glob("microcase_*")):
+            mc_json = d / "microcase.json"
+            if not mc_json.exists():
+                continue
+            try:
+                meta = json.loads(mc_json.read_text(encoding="utf-8"))
+                microcases.append({
+                    'microcase_id': int(meta.get('microcase_id')),
+                    'file_path': meta.get('file_path'),
+                    'line_number': meta.get('line_number'),
+                    'microcase': meta.get('microcase_text') or "",
+                    'review_comment': "",
+                    'solution': ""
+                })
+            except Exception:
+                continue
+    except Exception:
+        return []
+    # stable order by microcase_id
+    microcases.sort(key=lambda x: x.get('microcase_id') or 0)
+    return microcases
 
 async def listen_sse_stream(session_id: str, user_id: str, bot: Bot):
     """Listen to SSE stream and update user session with incoming microcases."""
@@ -209,7 +256,7 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             else:
                 await bot.send_message(
                     chat_id=int(user_id), 
-                    text=f"🎉 {message}\n\nВсего микрокейсов: {total_accepted}"
+                    text=f"⚙️ {message}.\n\nКоличество микрокейсов: {total_accepted}"
                 )
                 
                 # Show selection list now that generation is complete
@@ -267,26 +314,27 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     txt_parts.append("➡️ Отправьте валидный Python-код решением (только код, без пояснений)")
     
     message_text = "\n\n".join(txt_parts)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(text="⬅️ К списку", callback_data="back_to_list")]])
     
     try:
-        await bot.send_message(chat_id=chat_id, text=message_text, parse_mode='Markdown')
+        await bot.send_message(chat_id=chat_id, text=message_text, parse_mode='Markdown', reply_markup=keyboard)
     except Exception:
         # Fallback without markdown if parsing fails
-        await bot.send_message(chat_id=chat_id, text=message_text)
+        await bot.send_message(chat_id=chat_id, text=message_text, reply_markup=keyboard)
 
 async def show_cases_list(bot: Bot, chat_id: int, session: dict):
     buttons = []
-    for mc in session.get('microcases', []):
-        mc_id = mc.get('microcase_id')
+    for i, mc in enumerate(session.get('microcases', [])):
+        visible_no = i + 1
         fp = mc.get('file_path', '')
         ln = mc.get('line_number', '')
-        label = f"#{mc_id} — {fp}:{ln}"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc:{mc_id}")])
+        label = f"#{visible_no} — {fp}:{ln}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc_idx:{i}")])
     if not buttons:
         return
     await bot.send_message(
         chat_id=chat_id,
-        text="Выберите микрокейс для ответа:",
+        text="Выберите микрокейс для решения:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -301,23 +349,154 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
         return
     data = query.data or ""
-    if not data.startswith("choose_mc:"):
-        return
-    mc_id = data.split(":", 1)[1]
     microcases = session.get('microcases', [])
     idx = None
-    for i, mc in enumerate(microcases):
-        if str(mc.get('microcase_id')) == str(mc_id):
-            idx = i
-            break
+
+    if data.startswith("choose_mc_idx:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            idx = None
+    elif data.startswith("choose_mc:"):
+        mc_id = data.split(":", 1)[1]
+        for i, mc in enumerate(microcases):
+            if str(mc.get('microcase_id')) == str(mc_id):
+                idx = i
+                break
+    else:
+        return
     if idx is None:
         await query.edit_message_text("Микрокейс не найден.")
         return
     session['current'] = idx
     save_user_session(user_id, session)
     mc = microcases[idx]
-    await query.edit_message_text(f"Выбран микрокейс #{mc.get('microcase_id')}. Пришлите решение кодом.")
-    await send_microcase_message_by_bot(context.bot, query.message.chat_id, mc)
+    # Edit the list message into a microcase card (avoid extra message)
+    txt_parts = []
+    mc_id = mc.get("microcase_id") or mc.get("id") or mc.get("mc_id") or "<unknown-id>"
+    file_path = mc.get("file_path", "")
+    line_number = mc.get("line_number", "")
+    body = mc.get("microcase", "")
+
+    txt_parts.append(f"📌 **Микрокейс #{mc_id}**")
+    if file_path:
+        txt_parts.append(f"📄 Файл: `{file_path}:{line_number}`")
+    if body:
+        txt_parts.append(f"📝 Микрокейс:\n{body}")
+    else:
+        desc = mc.get("description") or mc.get("prompt") or ""
+        if desc:
+            txt_parts.append(f"📝 Описание:\n{desc}")
+    instructions = mc.get("instructions")
+    if instructions:
+        txt_parts.append(f"📋 Инструкции:\n{instructions}")
+    txt_parts.append("➡️ Отправьте валидный Python-код решением (только код, без пояснений)")
+
+    message_text = "\n\n".join(txt_parts)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(text="⬅️ К списку", callback_data="back_to_list")]])
+    try:
+        await query.edit_message_text(text=message_text, parse_mode='Markdown', reply_markup=keyboard)
+    except Exception:
+        await query.edit_message_text(text=message_text, reply_markup=keyboard)
+
+async def start_generation_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, pr_url: str):
+    session = load_user_session(user_id)
+    # Check if user already has active streaming session
+    if session and session.get('streaming', False):
+        await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
+        return
+
+    status, data = await post_json("/gen-microcases/", {"url": pr_url, "user_id": user_id})
+    if status != 202:
+        await update.message.reply_text(f"❌ Ошибка от backend: HTTP {status}. Подробнее: {data}")
+        return
+
+    session_id = data.get("session_id")
+    if not session_id:
+        await update.message.reply_text("❌ Backend не вернул session_id")
+        return
+
+    session = {
+        "session_id": session_id,
+        "microcases": [],
+        "current": 0,
+        "solved": [],
+        "awaiting_review": False,
+        "streaming": True,
+        "generation_complete": False,
+        "pr_url": pr_url
+    }
+    save_user_session(user_id, session)
+    try:
+        solved_cases[user_id] = set()
+    except Exception:
+        pass
+    await update.message.reply_text(
+        f"🚀 Началась генерация микрокейсов по PR `" + pr_url + "` — ожидайте.",
+        parse_mode='Markdown'
+    )
+    bot = context.bot
+    task = asyncio.create_task(listen_sse_stream(session_id, user_id, bot))
+    active_sse_tasks[user_id] = task
+
+async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user_id = str(query.from_user.id)
+    session = load_user_session(user_id)
+    if not session:
+        await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
+        return
+    # Edit current message in-place to show the list (no extra messages)
+    buttons = []
+    for i, mc in enumerate(session.get('microcases', [])):
+        visible_no = i + 1
+        fp = mc.get('file_path', '')
+        ln = mc.get('line_number', '')
+        label = f"#{visible_no} — {fp}:{ln}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc_idx:{i}")])
+    if not buttons:
+        await query.edit_message_text("Нет доступных микрокейсов.")
+        return
+    await query.edit_message_text(
+        text="Выберите микрокейс для решения:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def handle_use_cached_or_regen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user_id = str(query.from_user.id)
+    session = load_user_session(user_id) or {}
+    pending_pr = session.get("pending_pr_url")
+    if not pending_pr:
+        await query.edit_message_text("Ссылка не найдена. Пришлите ссылку снова.")
+        return
+    if query.data == "use_cached":
+        cached = load_cached_microcases(pending_pr)
+        if not cached:
+            await query.edit_message_text("Сохранённые микрокейсы не найдены. Запускаю генерацию заново...")
+            await start_generation_flow(update, context, user_id, pending_pr)
+            return
+        session.update({
+            "microcases": cached,
+            "current": 0,
+            "solved": [False for _ in cached],
+            "awaiting_review": False,
+            "streaming": False,
+            "generation_complete": True,
+            "pr_url": pending_pr
+        })
+        save_user_session(user_id, session)
+        await query.edit_message_text(f"Загружено из кеша: {len(cached)} микрокейсов.")
+        await show_cases_list(context.bot, int(user_id), session)
+    elif query.data == "regen":
+        await query.edit_message_text("Запускаю генерацию заново...")
+        await start_generation_flow(update, context, user_id, pending_pr)
 
 # --------------------
 # Хэндлеры
@@ -342,46 +521,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # если это ссылка (репозиторий)
     if text.startswith("http"):
-        # Check if user already has active streaming session
-        if session and session.get('streaming', False):
-            await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
+        # If cached microcases exist for this URL, offer choice
+        cached = load_cached_microcases(text)
+        if cached:
+            # save pending pr url in session
+            session = {
+                "session_id": None,
+                "microcases": [],
+                "current": 0,
+                "solved": [],
+                "awaiting_review": False,
+                "streaming": False,
+                "generation_complete": False,
+                "pending_pr_url": text
+            }
+            save_user_session(user_id, session)
+            buttons = [
+                [InlineKeyboardButton(text="🗂 Использовать сохранённые", callback_data="use_cached")],
+                [InlineKeyboardButton(text="🔁 Сгенерировать заново", callback_data="regen")]
+            ]
+            await update.message.reply_text(
+                "Для этой ссылки уже есть сохранённые микрокейсы. Что сделать?",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
             return
-            
-        # concise flow: no pre-message
-        
-        # Start microcase generation with new API (returns 202 with session_id)
-        status, data = await post_json("/gen-microcases/", {"url": text, "user_id": user_id})
-        if status != 202:
-            await update.message.reply_text(f"❌ Ошибка от backend: HTTP {status}. Подробнее: {data}")
-            return
-
-        session_id = data.get("session_id")
-        if not session_id:
-            await update.message.reply_text("❌ Backend не вернул session_id")
-            return
-
-        # создаём сессию для streaming
-        session = {
-            "session_id": session_id,
-            "microcases": [],
-            "current": 0,
-            "solved": [],
-            "awaiting_review": False,
-            "streaming": True,
-            "generation_complete": False
-        }
-        save_user_session(user_id, session)
-
-        await update.message.reply_text(
-            f"🚀 Началась генерация микрокейсов по PR `" + text + "` — ожидайте.",
-            parse_mode='Markdown'
-        )
-
-        # Start SSE listener in background
-        bot = context.bot
-        task = asyncio.create_task(listen_sse_stream(session_id, user_id, bot))
-        active_sse_tasks[user_id] = task
-        
+        # otherwise proceed to generation
+        await start_generation_flow(update, context, user_id, text)
         return
 
     # не ссылка: смотрим — есть ли активная сессия и ожидается ли ответ на микро-кейс
@@ -421,6 +586,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("⚙️ Отправляю решение на проверку...")
     payload = {"user_id": user_id, "microcase_id": mc_id, "solution": solution}
+    # pass pr_url when session was started from URL to allow cached check
+    pr_url = session.get("pr_url")
+    if pr_url:
+        payload["pr_url"] = pr_url
     status, data = await post_json("/check-microcase/", payload)
 
     if status != 200:
@@ -433,16 +602,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["solved"][current_index] = True
         session["current"] = current_index + 1
         save_user_session(user_id, session)
+        # Track solved microcase for user
+        try:
+            solved_cases.setdefault(user_id, set()).add(str(mc_id))
+        except Exception:
+            pass
         await update.message.reply_text("✅ Автотесты пройдены! Переходим к следующему микро-кейсу.")
         # если есть следующий — отправляем
         if session["current"] < len(microcases):
             next_mc = microcases[session["current"]]
             await send_microcase_message(update, next_mc)
-            await show_cases_list(context.bot, update.effective_chat.id, session)
         else:
             # все решены
             session["awaiting_review"] = True
-            save_sessions(sessions)
+            save_user_session(user_id, session)
+            await update.message.reply_text("Все микрокейсы пройдены!")
             await update.message.reply_text(
                 "🎉 Ты решил все микро-кейсы! Напиши, пожалуйста, краткое ревью/пояснение: "
                 "почему ты так решил, что вынес из решения и т.п. Отправь текст в ответ."
@@ -520,7 +694,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc:"))
+    app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc"))
+    app.add_handler(CallbackQueryHandler(handle_back_to_list, pattern="^back_to_list$"))
+    app.add_handler(CallbackQueryHandler(handle_use_cached_or_regen, pattern="^(use_cached|regen)$"))
     # Документы (файлы с кодом)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Текстовые сообщения: ссылки и решения
