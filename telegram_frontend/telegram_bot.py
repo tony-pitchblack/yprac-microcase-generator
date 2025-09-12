@@ -403,17 +403,17 @@ async def start_generation_flow(update: Update, context: ContextTypes.DEFAULT_TY
     session = load_user_session(user_id)
     # Check if user already has active streaming session
     if session and session.get('streaming', False):
-        await update.message.reply_text("🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
+        await context.bot.send_message(chat_id=int(user_id), text="🔄 У вас уже идет генерация микрокейсов. Дождитесь завершения.")
         return
 
     status, data = await post_json("/gen-microcases/", {"url": pr_url, "user_id": user_id})
     if status != 202:
-        await update.message.reply_text(f"❌ Ошибка от backend: HTTP {status}. Подробнее: {data}")
+        await context.bot.send_message(chat_id=int(user_id), text=f"❌ Ошибка от backend: HTTP {status}. Подробнее: {data}")
         return
 
     session_id = data.get("session_id")
     if not session_id:
-        await update.message.reply_text("❌ Backend не вернул session_id")
+        await context.bot.send_message(chat_id=int(user_id), text="❌ Backend не вернул session_id")
         return
 
     session = {
@@ -431,10 +431,7 @@ async def start_generation_flow(update: Update, context: ContextTypes.DEFAULT_TY
         solved_cases[user_id] = set()
     except Exception:
         pass
-    await update.message.reply_text(
-        f"🚀 Началась генерация микрокейсов по PR `" + pr_url + "` — ожидайте.",
-        parse_mode='Markdown'
-    )
+    await context.bot.send_message(chat_id=int(user_id), text=f"🚀 Началась генерация микрокейсов по PR `" + pr_url + "` — ожидайте.", parse_mode='Markdown')
     bot = context.bot
     task = asyncio.create_task(listen_sse_stream(session_id, user_id, bot))
     active_sse_tasks[user_id] = task
@@ -524,9 +521,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If cached microcases exist for this URL, offer choice
         cached = load_cached_microcases(text)
         if cached:
-            # save pending pr url in session
+            # save pending pr url in session (need non-empty session_id for persistence)
             session = {
-                "session_id": None,
+                "session_id": f"pending_{_hash_pr_url(text)[:10]}",
                 "microcases": [],
                 "current": 0,
                 "solved": [],
@@ -558,14 +555,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if session.get("awaiting_review"):
         review_text = text
         await update.message.reply_text("Отправляю ревью на оценку...")
-        status, data = await post_json("/evaluate-review/", {"user_id": user_id, "review": review_text})
+        payload = {"user_id": user_id, "review": review_text}
+        pr_url = session.get("pr_url")
+        if pr_url:
+            payload["pr_url"] = pr_url
+        status, data = await post_json("/evaluate-review/", payload)
         if status != 200:
             await update.message.reply_text(f"Ошибка от backend при оценке ревью: HTTP {status}. Подробнее: {data}")
             return
         # показать результат
         score = data.get("score")
-        feedback = data.get("feedback") or data.get("comment") or data
-        await update.message.reply_text(f"Оценка ревью: {score}\n\nКомментарий:\n{feedback}")
+        fedback = data.get("fedback") or data.get("feedback") or data.get("comment") or data
+        try:
+            msg = f"Оценка ревью: {int(score)}\n\nКомментарий:\n{str(fedback)}"
+        except Exception:
+            msg = f"Оценка ревью: {score}\n\nКомментарий:\n{fedback}"
+        await update.message.reply_text(msg)
         # завершаем сессию
         delete_user_session(user_id)
         await update.message.reply_text("Сессия завершена. Если хочешь — пришли новую ссылку на репозиторий.")

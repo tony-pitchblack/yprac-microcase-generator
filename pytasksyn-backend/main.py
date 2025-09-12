@@ -29,7 +29,7 @@ load_dotenv(env_path)
 sys.path.insert(0, str(root_dir))
 
 # Import pytasksyn modules
-from pytasksyn.main import load_config, run_pipeline
+from pytasksyn.main import load_config, run_pipeline, create_llm
 from pytasksyn.utils.logging_utils import init_logger, get_logger
 
 app = FastAPI()
@@ -39,7 +39,7 @@ SESSIONS: dict[str, asyncio.Queue] = {}
 LIMIT_CASES: int = 2
 
 # In-memory mapping to track session context for solution checking
-# Keyed by user_id → { session_id, session_dir, microcase_attempt_dirs: {cid: attempt_dir} }
+# Keyed by user_id → { session_id, session_dir, pr_url, microcase_attempt_dirs: {cid: attempt_dir} }
 SESSION_CONTEXTS: dict[str, dict] = {}
 
 def sse_format(event: str, data: dict) -> bytes:
@@ -53,6 +53,11 @@ class CheckMicrocaseRequest(BaseModel):
     user_id: str
     microcase_id: Union[int, str]
     solution: str
+    pr_url: Optional[str] = None
+
+class EvaluateReviewRequest(BaseModel):
+    user_id: str
+    review: str
     pr_url: Optional[str] = None
 
 def parse_github_pr_url(url: str) -> Optional[tuple[str, str, str]]:
@@ -427,7 +432,8 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         SESSION_CONTEXTS[request.user_id] = {
             "session_id": session_id,
             "session_dir": str(session_dir),
-            "microcase_attempt_dirs": {}
+            "microcase_attempt_dirs": {},
+            "pr_url": pr_url
         }
 
         async def _producer():
@@ -631,6 +637,18 @@ async def check_microcase(request: CheckMicrocaseRequest):
     autotest_path = attempt_dir_path / "tests" / "test_microcase.py"
     success, out, err = _run_student_tests(attempt_dir_path, request.solution)
     if success:
+        # Persist student's passing solution under PR cache for later review evaluation
+        try:
+            pr_url = request.pr_url or (SESSION_CONTEXTS.get(request.user_id) or {}).get("pr_url")
+            if pr_url:
+                pr_hash = _hash_pull_request_url(pr_url)
+                storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+                micro_dir = storage_root / f"microcase_{mc_id_int}"
+                student_dir = micro_dir / "student_solutions"
+                student_dir.mkdir(parents=True, exist_ok=True)
+                (student_dir / f"{request.user_id}.py").write_text(request.solution, encoding="utf-8")
+        except Exception:
+            pass
         return {"status": "passed"}
 
     # On failure, provide brief explanation
@@ -643,6 +661,139 @@ async def check_microcase(request: CheckMicrocaseRequest):
         "attempt_dir": str(attempt_dir_path),
         "autotest_path": str(autotest_path)
     }
+
+@app.post("/evaluate-review/")
+async def evaluate_review(request: EvaluateReviewRequest):
+    # Determine PR URL
+    pr_url = request.pr_url or (SESSION_CONTEXTS.get(request.user_id) or {}).get("pr_url")
+    if not pr_url:
+        raise HTTPException(status_code=400, detail="pr_url is required (not found in session)")
+
+    pr_hash = _hash_pull_request_url(pr_url)
+    storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+    if not storage_root.exists():
+        raise HTTPException(status_code=404, detail="No cached microcases for this PR")
+
+    # Load all microcases and expert solutions
+    all_microcases: list[dict] = []
+    expert_solutions: dict[int, str] = {}
+    student_solutions: dict[int, str] = {}
+
+    try:
+        for mc_dir in sorted(storage_root.glob("microcase_*")):
+            try:
+                mc_json = mc_dir / "microcase.json"
+                meta = json.loads(mc_json.read_text(encoding="utf-8")) if mc_json.exists() else {}
+            except Exception:
+                meta = {}
+            try:
+                mc_id = int(meta.get("microcase_id")) if meta.get("microcase_id") is not None else None
+            except Exception:
+                mc_id = None
+            all_microcases.append({
+                "microcase_id": mc_id,
+                "file_path": meta.get("file_path"),
+                "line_number": meta.get("line_number"),
+                "microcase": meta.get("microcase_text") or ""
+            })
+            # Expert solution
+            exp_path = mc_dir / "solution_expert.py"
+            if mc_id is not None and exp_path.exists():
+                try:
+                    expert_solutions[mc_id] = exp_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+            # Student solution for this user (if exists)
+            stu_path = mc_dir / "student_solutions" / f"{request.user_id}.py"
+            if mc_id is not None and stu_path.exists():
+                try:
+                    student_solutions[mc_id] = stu_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load microcases: {e}")
+
+    # Build prompt context
+    solved_ids = sorted(k for k in student_solutions.keys())
+    if not solved_ids:
+        raise HTTPException(status_code=409, detail="No solved microcases found for this user")
+
+    def _fmt_cases(cases: list[dict]) -> str:
+        parts = []
+        for c in cases:
+            cid = c.get("microcase_id")
+            body = c.get("microcase") or ""
+            fp = c.get("file_path") or ""
+            ln = c.get("line_number")
+            loc = f"{fp}:{ln}" if fp else ""
+            parts.append(f"- ID {cid} {('('+loc+')') if loc else ''}:\n{body}\n")
+        return "\n".join(parts)
+
+    def _fmt_code_map(code_map: dict[int, str], title: str) -> str:
+        lines = [title]
+        for cid in sorted(code_map.keys()):
+            code = code_map[cid]
+            lines.append(f"[ID {cid}]\n```python\n{code}\n```\n")
+        return "\n".join(lines)
+
+    all_cases_text = _fmt_cases(all_microcases)
+    expert_code_text = _fmt_code_map({cid: expert_solutions.get(cid, '') for cid in sorted(expert_solutions.keys())}, "Эталонные решения (эксперт):")
+    student_code_text = _fmt_code_map({cid: student_solutions[cid] for cid in solved_ids}, "Решения студента (только решённые):")
+
+    prompt = (
+        "Ты — преподаватель программирования. Оцени, насколько хорошо студент усвоил материал по решённым им микро-кейсам.\n"
+        "Даны:\n"
+        "1) Все микрокейсы (для контекста):\n" + all_cases_text + "\n\n"
+        "2) Эталонные решения эксперта (могут отсутствовать для некоторых кейсов):\n" + expert_code_text + "\n\n"
+        "3) Решения студента по тем кейсам, которые он прошёл тестами:\n" + student_code_text + "\n\n"
+        "4) Текстовое ревью студента по своим решениям:\n" + (request.review or "") + "\n\n"
+        "Оцени понимание по шкале 0..100, где 0 — не понял, 100 — отлично понял.\n"
+        "Ответь строго JSON c двумя полями: {\"score\": <целое 0..100>, \"fedback\": <краткий комментарий>}"
+    )
+
+    # Create LLM instance for evaluation
+    model_provider = os.getenv("REVIEW_PROVIDER", "yandex")
+    model_name = os.getenv("REVIEW_MODEL", "yandexgpt-lite")
+    try:
+        llm = create_llm({"provider": model_provider, "model_name": model_name})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM init failed: {e}")
+
+    # Invoke LLM
+    try:
+        response = None
+        try:
+            response = llm.invoke(prompt)  # type: ignore
+        except Exception:
+            # Fallback to callable interface
+            response = llm(prompt)  # type: ignore
+        if hasattr(response, "content"):
+            text = getattr(response, "content")
+        else:
+            text = str(response)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
+
+    # Parse JSON/score
+    score: Optional[int] = None
+    fedback: Optional[str] = None
+    try:
+        obj = json.loads(text)
+        score = int(obj.get("score"))
+        fedback = obj.get("fedback") or obj.get("feedback") or obj.get("comment")
+    except Exception:
+        # Try to extract first integer 0..100
+        try:
+            m = re.search(r"\b(100|\d{1,2})\b", text)
+            if m:
+                score = int(m.group(1))
+            fedback = text.strip()
+        except Exception:
+            pass
+    if score is None:
+        raise HTTPException(status_code=500, detail="Failed to parse score from LLM response")
+    score = max(0, min(100, score))
+    return {"score": score, "fedback": (fedback or "").strip()}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
