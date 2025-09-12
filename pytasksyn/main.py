@@ -66,10 +66,16 @@ def load_config(args=None):
     script_dir = Path(__file__).parent.resolve()
     root_dir = script_dir.parent
     
-    # Always use pytasksyn/config.yml as the primary config
+    # Always use pytasksyn/config.yml as the primary config. If missing, copy from config_default.yml
     config_path = script_dir / "config.yml"
+    default_config_path = script_dir / "config_default.yml"
     if not config_path.exists():
-        raise ValueError(f"Файл конфигурации не найден: {config_path}")
+        if not default_config_path.exists():
+            raise ValueError(f"Файл конфигурации не найден: {config_path}. Также отсутствует файл по умолчанию: {default_config_path}")
+        try:
+            shutil.copy2(default_config_path, config_path)
+        except Exception as e:
+            raise ValueError(f"Не удалось создать config.yml из config_default.yml: {e}")
     
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
