@@ -19,6 +19,7 @@ import uuid
 import shutil
 import subprocess
 import hashlib
+import yaml
 
 # Load .env from root folder
 root_dir = Path(__file__).parent.parent
@@ -74,6 +75,63 @@ def _hash_pull_request_url(url: str) -> str:
 
 def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _load_default_config() -> dict:
+    """Load backend config. If pytasksyn-backend/config.yml is missing, copy from pytasksyn-backend/config_default.yml."""
+    backend_cfg_dir = root_dir / "pytasksyn-backend"
+    backend_cfg_path = backend_cfg_dir / "config.yml"
+    backend_default_path = backend_cfg_dir / "config_default.yml"
+
+    if not backend_cfg_path.exists():
+        if not backend_default_path.exists():
+            raise HTTPException(status_code=500, detail=f"Backend default config not found: {backend_default_path}")
+        try:
+            shutil.copy2(backend_default_path, backend_cfg_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create backend config.yml from default: {e}")
+
+    try:
+        with open(backend_cfg_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read backend config: {e}")
+
+def _apply_backend_overrides(base_config: dict, project_dir: Path, review_csv: Path) -> dict:
+    """Merge dynamic backend paths and env-based model overrides into default config."""
+    cfg = dict(base_config or {})
+
+    # Paths (required)
+    cfg.setdefault('paths', {})
+    cfg['paths']['student_project'] = str(project_dir)
+    cfg['paths']['code_review_file'] = str(review_csv)
+
+    # Stages: by default keep tutor/student disabled unless default config explicitly enables
+    cfg.setdefault('stages', {})
+    cfg['stages'].setdefault('enable_tutor', False)
+    cfg['stages'].setdefault('enable_student', False)
+
+    # Models: optional env overrides to align with server deployment needs
+    cfg.setdefault('models', {})
+    cfg['models'].setdefault('preprocessor', {})
+    cfg['models'].setdefault('expert', {})
+
+    preprov = os.getenv("PREPROCESSOR_PROVIDER")
+    premodel = os.getenv("PREPROCESSOR_MODEL")
+    if preprov:
+        cfg['models']['preprocessor']['provider'] = preprov
+    if premodel:
+        cfg['models']['preprocessor']['model_name'] = premodel
+
+    expprov = os.getenv("EXPERT_PROVIDER")
+    expmodel = os.getenv("EXPERT_MODEL")
+    if expprov:
+        cfg['models']['expert']['provider'] = expprov
+    if expmodel:
+        cfg['models']['expert']['model_name'] = expmodel
+
+    # Output settings come from backend config files (config.yml/default)
+
+    return cfg
 
 def _cache_microcases(pr_url: str, session_dir: Path) -> None:
     if not ENABLE_CACHE:
@@ -399,32 +457,16 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         
         # Create CSV from PR comments
         review_csv = await create_review_csv_from_comments(review_comments, temp_dir)
-        
-        # Minimal config
-        config = {
-            'paths': {
-                'student_project': str(project_dir),
-                'code_review_file': str(review_csv)
-            },
-            'stages': {
-                'enable_tutor': False,
-                'enable_student': False
-            },
-            'models': {
-                'preprocessor': {'provider': 'yandex', 'model_name': 'yandexgpt-lite'},
-                'expert': {'provider': 'yandex', 'model_name': 'yandexgpt'}
-            },
-            'expert': {
-                'max_attempts': 2,
-                'context_max_symbols': 5000,
-                'context_comment_margin': 50,
-                'context_add_rest': False
-            },
-            'output': {
-                'session_prefix': 'session',
-                'base_output_dir': 'tmp/pytasksyn-backend'
-            }
-        }
+
+        # Load default config and apply backend overrides
+        base_config = _load_default_config()
+        config = _apply_backend_overrides(base_config, project_dir, review_csv)
+        # Persist effective config for this session
+        try:
+            with open(session_dir / "config_used.yml", 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+        except Exception:
+            pass
 
         # Create SSE session
         session_id = uuid.uuid4().hex

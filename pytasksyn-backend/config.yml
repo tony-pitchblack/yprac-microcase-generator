@@ -1,0 +1,23 @@
+stages:
+  enable_tutor: false
+  enable_student: false
+
+models:
+  preprocessor:
+    provider: yandex
+    model_name: yandexgpt
+  expert:
+    provider: yandex
+    model_name: yandexgpt
+
+expert:
+  max_attempts: 2
+  context_max_symbols: 5000
+  context_comment_margin: 50
+  context_add_rest: false
+
+output:
+  session_prefix: session
+  base_output_dir: tmp/pytasksyn-backend
+
+
