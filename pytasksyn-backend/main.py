@@ -63,6 +63,61 @@ async def fetch_pr_comments(owner: str, repo: str, pr_number: str) -> list:
     
     return comments
 
+async def fetch_github_file_content(owner: str, repo: str, file_path: str, ref: str = "HEAD") -> str:
+    """Fetch file content from GitHub repository"""
+    github_token = os.getenv("GITHUB_TOKEN")
+    headers = {}
+    if github_token:
+        headers["Authorization"] = f"token {github_token}"
+    
+    # Use Contents API to fetch file
+    contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{file_path}"
+    params = {"ref": ref}
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(contents_url, headers=headers, params=params)
+        if response.status_code == 200:
+            file_data = response.json()
+            if file_data.get('encoding') == 'base64':
+                import base64
+                content = base64.b64decode(file_data['content']).decode('utf-8')
+                return content
+        
+        # If Contents API fails, try Raw API
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{file_path}"
+        response = await client.get(raw_url, headers=headers)
+        if response.status_code == 200:
+            return response.text
+    
+    raise Exception(f"Could not fetch file {file_path} from {owner}/{repo}")
+
+async def create_project_from_github(owner: str, repo: str, review_comments: list, project_dir: Path, ref: str = "HEAD"):
+    """Create project structure by fetching real files from GitHub"""
+    # Get unique file paths from comments
+    file_paths = list(set(comment['path'] for comment in review_comments))
+    
+    logger = get_logger()
+    logger.info(f"Fetching {len(file_paths)} files from GitHub repo {owner}/{repo}")
+    
+    for file_path in file_paths:
+        try:
+            logger.info(f"Fetching file: {file_path}")
+            content = await fetch_github_file_content(owner, repo, file_path, ref)
+            
+            # Create local file
+            local_file = project_dir / file_path
+            local_file.parent.mkdir(parents=True, exist_ok=True)
+            local_file.write_text(content, encoding='utf-8')
+            
+            logger.info(f"Successfully saved: {file_path}")
+            
+        except Exception as e:
+            logger.warning(f"Could not fetch {file_path}: {e}")
+            # Create a minimal placeholder file for missing files
+            local_file = project_dir / file_path
+            local_file.parent.mkdir(parents=True, exist_ok=True)
+            local_file.write_text(f"# Could not fetch original file: {e}\n# File: {file_path}\n", encoding='utf-8')
+
 async def create_review_csv_from_comments(comments: list, temp_dir: Path) -> Path:
     """Create a CSV file from PR comments in the expected format for pytasksyn"""
     csv_path = temp_dir / "code_review.csv"
@@ -127,28 +182,12 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         session_dir = Path("tmp") / "pytasksyn-backend" / f"session_{timestamp}"
         session_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create mock project structure in session directory (not temp)
-        project_dir = session_dir / "mock_project"
+        # Create real project structure by fetching files from GitHub
+        project_dir = session_dir / "source_project"
         project_dir.mkdir()
         
-        # Create mock files mentioned in comments with sufficient content
-        file_max_lines = {}
-        # First pass: find max line number for each file
-        for comment in review_comments:
-            file_path = comment['path']
-            line_num = int(comment['line'])
-            file_max_lines[file_path] = max(file_max_lines.get(file_path, 0), line_num)
-        
-        # Second pass: create files with enough lines
-        for file_path, max_line in file_max_lines.items():
-            mock_file = project_dir / file_path
-            mock_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Create mock content with enough lines (add buffer of 10 extra lines)
-            lines = [f"# Mock file: {file_path}"]
-            lines.extend([f"# Line {i} - placeholder content" for i in range(2, max_line + 11)])
-            mock_content = "\n".join(lines)
-            mock_file.write_text(mock_content, encoding='utf-8')
+        # Fetch real files from GitHub repository
+        await create_project_from_github(owner, repo, review_comments, project_dir)
         
         # Create temporary directory for CSV file
         with tempfile.TemporaryDirectory() as temp_dir_str:
