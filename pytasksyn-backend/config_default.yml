@@ -16,6 +16,10 @@ expert:
   context_comment_margin: 50
   context_add_rest: false
 
+tutor:
+  max_solution_attempts: 3
+  acceptance_threshold: 0.5
+
 output:
   session_prefix: session
   base_output_dir: tmp/pytasksyn-backend

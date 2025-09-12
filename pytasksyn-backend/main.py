@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import hashlib
 import yaml
+import traceback
 
 # Load .env from root folder
 root_dir = Path(__file__).parent.parent
@@ -37,7 +38,7 @@ app = FastAPI()
 
 # Simple in-memory session storage for SSE
 SESSIONS: dict[str, asyncio.Queue] = {}
-LIMIT_CASES: int = 2
+LIMIT_CASES: Optional[int] = None
 ENABLE_CACHE: bool = False
 
 # In-memory mapping to track session context for solution checking
@@ -133,6 +134,24 @@ def _apply_backend_overrides(base_config: dict, project_dir: Path, review_csv: P
 
     return cfg
 
+def _resolve_limit_cases_from_config(cfg: dict) -> Optional[int]:
+    """Resolve limit_cases from possible config locations."""
+    try:
+        gen = (cfg.get("generation") or {}) if isinstance(cfg, dict) else {}
+        lim = (cfg.get("limits") or {}) if isinstance(cfg, dict) else {}
+        for candidate in [gen.get("limit_cases"), lim.get("limit_cases"), (cfg.get("limit_cases") if isinstance(cfg, dict) else None)]:
+            if candidate is None:
+                continue
+            if isinstance(candidate, int):
+                return candidate
+            try:
+                return int(candidate)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
 def _cache_microcases(pr_url: str, session_dir: Path) -> None:
     if not ENABLE_CACHE:
         return
@@ -164,6 +183,9 @@ def _cache_microcases(pr_url: str, session_dir: Path) -> None:
         pass
 
     for entry in report:
+        # Cache only accepted microcases (tutor must have accepted)
+        if not entry.get("accepted"):
+            continue
         try:
             cid = int(entry.get("comment_id"))
         except Exception:
@@ -415,12 +437,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         limit_cases = None
         try:
             base_cfg_for_limits = _load_default_config()
-            if isinstance(base_cfg_for_limits, dict):
-                limit_cases = (
-                    ((base_cfg_for_limits.get("generation") or {}).get("limit_cases"))
-                    or ((base_cfg_for_limits.get("limits") or {}).get("limit_cases"))
-                    or base_cfg_for_limits.get("limit_cases")
-                )
+            limit_cases = _resolve_limit_cases_from_config(base_cfg_for_limits)
         except Exception:
             pass
         
@@ -441,7 +458,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
         # Limit number of review comments to process
-        if limit_cases and limit_cases > 0 and len(review_comments) > limit_cases:
+        if limit_cases and limit_cases > 0 and len(review_comments) > int(limit_cases):
             review_comments = review_comments[:limit_cases]
             logger.info(f"Limiting review comments to {limit_cases} (from config or CLI)")
         
@@ -522,10 +539,16 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     pass
 
                 expert_results = results.get('expert_results') or {}
+                tutor_results = results.get('tutor_results') or {}
                 total_sent = 0
                 for cid, er in expert_results.items():
                     if not er.get('success'):
                         continue
+                    # If tutor stage ran, only stream accepted by tutor
+                    if tutor_results:
+                        tr = tutor_results.get(cid)
+                        if not tr or not tr.get('accepted'):
+                            continue
                     attempt_dir = Path(er['successful_attempt_dir'])
                     mc_path = attempt_dir / "microcase.txt"
                     try:
@@ -556,8 +579,9 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
 
                 await queue.put(("complete", {"message": "Генерация завершена", "total_accepted": total_sent}))
             except Exception as e:
-                prod_logger.error(f"SSE producer failed: {e}")
-                await queue.put(("error", {"message": str(e)}))
+                tb = traceback.format_exc()
+                prod_logger.error(f"SSE producer failed: {e}\n{tb}")
+                await queue.put(("error", {"message": str(e), "traceback": tb}))
                 await queue.put(("complete", {"message": "Завершено с ошибкой", "total_accepted": 0}))
             finally:
                 try:
@@ -572,7 +596,8 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         raise  # Re-raise HTTP exceptions
     except Exception as e:
         logger = get_logger()
-        logger.error(f"Error processing request: {str(e)}")
+        tb = traceback.format_exc()
+        logger.error(f"Error processing request: {str(e)}\n{tb}")
         raise HTTPException(status_code=500, detail=f"Failed to process request: {str(e)}")
 
 @app.get("/stream-microcases/{session_id}")
@@ -606,7 +631,8 @@ def start_server_with_ngrok():
     # Print configuration on startup
     try:
         config = _load_default_config()
-        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else config.get('limit_cases')
+        cfg_limit = _resolve_limit_cases_from_config(config)
+        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else cfg_limit
         print(f"Microcase limit: {effective_limit}")
     except Exception as e:
         print(f"⚠️  Could not load config for startup info: {e}")
@@ -625,7 +651,8 @@ def start_server():
     # Print configuration on startup
     try:
         config = _load_default_config()
-        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else config.get('limit_cases')
+        cfg_limit = _resolve_limit_cases_from_config(config)
+        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else cfg_limit
         print(f"Microcase limit: {effective_limit}")
     except Exception as e:
         print(f"⚠️  Could not load config for startup info: {e}")
@@ -880,11 +907,11 @@ async def evaluate_review(request: EvaluateReviewRequest):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
     parser.add_argument("--ngrok", action="store_true", help="Start server with ngrok tunnel")
-    parser.add_argument("--limit-cases", type=int, default=2, help="Limit number of review comments to process")
+    parser.add_argument("--limit-cases", type=int, default=None, help="Limit number of review comments to process")
     args = parser.parse_args()
     
     # Set global limit
-    LIMIT_CASES = int(getattr(args, "limit_cases", 2))
+    LIMIT_CASES = getattr(args, "limit_cases", None)
     
     if args.ngrok:
         start_server_with_ngrok()

@@ -257,108 +257,91 @@ def run_pipeline(config=None, session_dir=None):
     """Run the pipeline - can be called externally or from main()"""
     logger = get_logger()
     
-    try:
-        # Setup session directory if not provided
-        if session_dir is None:
-            session_dir = setup_session_directory(config)
-        
-        # Create LLM instances
-        preprocessor_llm = create_llm(config['models']['preprocessor'])
-        expert_llm = create_llm(config['models']['expert'])
-        
-        # Tutor/Student LLMs and stages: create only if explicitly enabled in config (default: disabled)
-        tutor_llm = None
-        student_llm = None
-        if config.get('stages', {}).get('enable_tutor', False):
-            try:
-                tutor_model_cfg = (config.get('models') or {}).get('tutor')
-                if not isinstance(tutor_model_cfg, dict) or not tutor_model_cfg.get('provider') or not tutor_model_cfg.get('model_name'):
-                    logger.error("Tutor stage enabled but models.tutor is missing or incomplete (provider/model_name)")
-                else:
-                    tutor_llm = create_llm(tutor_model_cfg)
-            except KeyError as e:
-                logger.error(f"Tutor stage initialization failed due to missing config key: {e}")
-            except Exception as e:
-                logger.error(f"Tutor LLM initialization failed: {e}")
-        if config.get('stages', {}).get('enable_student', False):
-            try:
-                student_llm = create_llm(config['models']['student'])
-            except Exception as e:
-                logger.error(f"Student LLM initialization failed: {e}")
-        
-        logger.info(f"Каталог сессии: {session_dir}")
-        logger.info(f"Модель препроцессинга: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
-        logger.info(f"Модель эксперта: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
-        if tutor_llm:
-            logger.info(f"Модель наставника: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
+    # Setup session directory if not provided
+    if session_dir is None:
+        session_dir = setup_session_directory(config)
+    
+    # Create LLM instances
+    preprocessor_llm = create_llm(config['models']['preprocessor'])
+    expert_llm = create_llm(config['models']['expert'])
+    
+    # Tutor/Student LLMs and stages: create only if explicitly enabled in config (default: disabled)
+    tutor_llm = None
+    student_llm = None
+    if config.get('stages', {}).get('enable_tutor', False):
+        tutor_model_cfg = (config.get('models') or {}).get('tutor')
+        if not isinstance(tutor_model_cfg, dict) or not tutor_model_cfg.get('provider') or not tutor_model_cfg.get('model_name'):
+            # Fallback: use expert model as tutor to ensure guardrail runs
+            logger.warning("Tutor model missing/incomplete; falling back to expert model for tutor stage")
+            tutor_llm = expert_llm
         else:
-            logger.info("Этап наставника ОТКЛЮЧЁН (используйте --enable-tutor, чтобы включить).")
-        if student_llm:
-            logger.info(f"Модель студента: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
-        else:
-            logger.info("Этап студента ОТКЛЮЧЁН (используйте --enable-student, чтобы включить).")
-        
-        # Initialize stages
-        preprocessing_stage = PreprocessingStage(config, session_dir, preprocessor_llm)
-        expert_stage = ExpertStage(config, session_dir, expert_llm)
-        tutor_stage = TutorStage(config, session_dir, tutor_llm) if tutor_llm else None
-        student_stage = StudentStage(config, session_dir, student_llm) if student_llm else None
-        
-        # Execute pipeline
-        logger.stage_start("препроцессинг")
-        deduplicated_review_file = preprocessing_stage.run()
-        
-        logger.stage_start("эксперт")
-        expert_results = expert_stage.run(deduplicated_review_file)
-        
-        tutor_results = None
-        if tutor_stage:
-            logger.stage_start("наставник")
-            tutor_results = tutor_stage.run(expert_results)
-        
-        student_results = None
-        if student_stage:
-            logger.stage_start("студент")
-            student_results = student_stage.run(expert_results, tutor_results)
-        
-        # Generate final report
-        logger.stage_start("генерация отчёта")
-        generate_final_report(config, session_dir, expert_results, tutor_results, student_results)
-        
-        logger.success(f"Пайплайн завершён. Результаты сохранены в: {session_dir}")
-        
-        return {
-            'session_dir': session_dir,
-            'expert_results': expert_results,
-            'tutor_results': tutor_results,
-            'student_results': student_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Сбой пайплайна: {e}")
-        raise
+            tutor_llm = create_llm(tutor_model_cfg)
+    if config.get('stages', {}).get('enable_student', False):
+        student_llm = create_llm(config['models']['student'])
+    
+    logger.info(f"Каталог сессии: {session_dir}")
+    logger.info(f"Модель препроцессинга: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
+    logger.info(f"Модель эксперта: {config['models']['expert']['provider']}/{config['models']['expert']['model_name']}")
+    if tutor_llm:
+        logger.info(f"Модель наставника: {config['models']['tutor']['provider']}/{config['models']['tutor']['model_name']}")
+    else:
+        logger.info("Этап наставника ОТКЛЮЧЁН (используйте --enable-tutor, чтобы включить).")
+    if student_llm:
+        logger.info(f"Модель студента: {config['models']['student']['provider']}/{config['models']['student']['model_name']}")
+    else:
+        logger.info("Этап студента ОТКЛЮЧЁН (используйте --enable-student, чтобы включить).")
+    
+    # Initialize stages
+    preprocessing_stage = PreprocessingStage(config, session_dir, preprocessor_llm)
+    expert_stage = ExpertStage(config, session_dir, expert_llm)
+    tutor_stage = TutorStage(config, session_dir, tutor_llm) if tutor_llm else None
+    student_stage = StudentStage(config, session_dir, student_llm) if student_llm else None
+    
+    # Execute pipeline
+    logger.stage_start("препроцессинг")
+    deduplicated_review_file = preprocessing_stage.run()
+    
+    logger.stage_start("эксперт")
+    expert_results = expert_stage.run(deduplicated_review_file)
+    
+    tutor_results = None
+    if tutor_stage:
+        logger.stage_start("наставник")
+        tutor_results = tutor_stage.run(expert_results)
+    
+    student_results = None
+    if student_stage:
+        logger.stage_start("студент")
+        student_results = student_stage.run(expert_results, tutor_results)
+    
+    # Generate final report
+    logger.stage_start("генерация отчёта")
+    generate_final_report(config, session_dir, expert_results, tutor_results, student_results)
+    
+    logger.success(f"Пайплайн завершён. Результаты сохранены в: {session_dir}")
+    
+    return {
+        'session_dir': session_dir,
+        'expert_results': expert_results,
+        'tutor_results': tutor_results,
+        'student_results': student_results
+    }
 
 def main():
-    try:
-        # Parse args once (we pass them into load_config to avoid double parsing)
-        args = parse_args()
+    # Parse args once (we pass them into load_config to avoid double parsing)
+    args = parse_args()
 
-        # Load configuration
-        config, _ = load_config(args)
-        
-        # Setup session directory
-        session_dir = setup_session_directory(config)
-        
-        # Initialize logger with session directory
-        init_logger(session_dir, console_output=True)
-        
-        # Run the pipeline
-        run_pipeline(config, session_dir)
-        
-    except Exception as e:
-        logger = get_logger()
-        logger.error(f"Сбой пайплайна: {e}")
-        sys.exit(1)
+    # Load configuration
+    config, _ = load_config(args)
+    
+    # Setup session directory
+    session_dir = setup_session_directory(config)
+    
+    # Initialize logger with session directory
+    init_logger(session_dir, console_output=True)
+    
+    # Run the pipeline (let exceptions propagate)
+    run_pipeline(config, session_dir)
 
 def generate_final_report(config, session_dir, expert_results, tutor_results, student_results):
     """Generate final script report"""

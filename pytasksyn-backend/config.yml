@@ -10,12 +10,19 @@ models:
   expert:
     provider: yandex
     model_name: yandexgpt
+  tutor:
+    provider: yandex
+    model_name: yandexgpt
 
 expert:
   max_attempts: 2
   context_max_symbols: 5000
   context_comment_margin: 50
   context_add_rest: false
+
+tutor:
+  max_solution_attempts: 3
+  acceptance_threshold: 0.5
 
 output:
   session_prefix: session
