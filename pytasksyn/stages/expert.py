@@ -11,7 +11,7 @@ from typing import Dict, Any
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from pytasksyn.utils.logging_utils import get_logger
+from utils.logging_utils import get_logger
 
 
 class ExpertStage:
@@ -293,7 +293,7 @@ class ExpertStage:
 
 Оформление к микро-кейсу:
 Название ошибки, на основе которого выделен микро кейсы должно писаться с верху и быть выделен жирным цветом.
-Далее должно быть описание микро кейсы.
+Далее должно быть описание микро кейсы как на leetcode буквально в 2-5 предложений. И больше ничего не выводи.
 
 Описание микро-кейса:
         """
