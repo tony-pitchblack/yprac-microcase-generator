@@ -592,21 +592,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # показать результат (надёжный парсинг JSON)
         score = data.get("score")
-        feedback_text = data.get("fedback") or data.get("feedback") or data.get("comment")
+        feedback_text = data.get("feedback") or data.get("fedback") or data.get("comment")
         if (score is None or feedback_text is None) and data.get("_raw_text"):
             try:
                 raw_obj = json.loads(data.get("_raw_text") or "{}")
                 if score is None:
                     score = raw_obj.get("score")
                 if feedback_text is None:
-                    feedback_text = raw_obj.get("fedback") or raw_obj.get("feedback") or raw_obj.get("comment")
+                    feedback_text = raw_obj.get("feedback") or raw_obj.get("fedback") or raw_obj.get("comment")
             except Exception:
                 pass
+        # If feedback_text accidentally contains a JSON object string, extract only the `feedback` field
+        if isinstance(feedback_text, str):
+            fb_str = feedback_text.strip()
+            if (fb_str.startswith("{") and fb_str.endswith("}")) or (fb_str.startswith("[") and fb_str.endswith("]")):
+                try:
+                    fb_obj = json.loads(fb_str)
+                    feedback_text = fb_obj.get("feedback") or fb_obj.get("fedback") or fb_obj
+                except Exception:
+                    pass
         try:
             score_str = str(int(score)) if score is not None else "—"
         except Exception:
             score_str = str(score)
         feedback_str = str(feedback_text or "—")
+        # Show only the final feedback content for the review section
         msg = f"Оценка: {score_str}\n\nФинальный отзыв:\n{feedback_str}"
         await update.message.reply_text(msg)
         # завершаем сессию
