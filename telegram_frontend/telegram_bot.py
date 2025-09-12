@@ -126,6 +126,8 @@ async def post_json(path: str, payload: dict, timeout=15):
 # --------------------
 # Cache helpers
 # --------------------
+# Feature flag to disable cache usage globally
+ENABLE_CACHE = False
 def _hash_pr_url(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
@@ -134,19 +136,43 @@ def _cached_root_for_url(url: str) -> Path:
     return Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
 
 def load_cached_microcases(pr_url: str) -> List[dict]:
+    if not ENABLE_CACHE:
+        return []
     root = _cached_root_for_url(pr_url)
     if not root.exists():
         return []
     microcases: List[dict] = []
     try:
         for d in sorted(root.glob("microcase_*")):
+            # derive cid from folder name as fallback
+            dir_cid: Optional[int] = None
+            try:
+                suffix = d.name.split("_", 1)[1]
+                dir_cid = int(suffix)
+            except Exception:
+                dir_cid = None
             mc_json = d / "microcase.json"
             if not mc_json.exists():
+                # fallback: minimal record from directory only
+                if dir_cid is not None:
+                    microcases.append({
+                        'microcase_id': dir_cid,
+                        'file_path': None,
+                        'line_number': None,
+                        'microcase': "",
+                        'review_comment': "",
+                        'solution': ""
+                    })
                 continue
             try:
                 meta = json.loads(mc_json.read_text(encoding="utf-8"))
+                # prefer explicit id, fallback to dir-based id
+                try:
+                    cid = int(meta.get('microcase_id'))
+                except Exception:
+                    cid = dir_cid
                 microcases.append({
-                    'microcase_id': int(meta.get('microcase_id')),
+                    'microcase_id': cid,
                     'file_path': meta.get('file_path'),
                     'line_number': meta.get('line_number'),
                     'microcase': meta.get('microcase_text') or "",
@@ -328,7 +354,8 @@ async def show_cases_list(bot: Bot, chat_id: int, session: dict):
         visible_no = i + 1
         fp = mc.get('file_path', '')
         ln = mc.get('line_number', '')
-        label = f"#{visible_no} — {fp}:{ln}"
+        loc = f"{fp}:{ln}" if fp else ""
+        label = f"#{visible_no} {loc}".strip()
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc_idx:{i}")])
     if not buttons:
         return
@@ -563,13 +590,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if status != 200:
             await update.message.reply_text(f"Ошибка от backend при оценке ревью: HTTP {status}. Подробнее: {data}")
             return
-        # показать результат
+        # показать результат (надёжный парсинг JSON)
         score = data.get("score")
-        fedback = data.get("fedback") or data.get("feedback") or data.get("comment") or data
+        feedback_text = data.get("fedback") or data.get("feedback") or data.get("comment")
+        if (score is None or feedback_text is None) and data.get("_raw_text"):
+            try:
+                raw_obj = json.loads(data.get("_raw_text") or "{}")
+                if score is None:
+                    score = raw_obj.get("score")
+                if feedback_text is None:
+                    feedback_text = raw_obj.get("fedback") or raw_obj.get("feedback") or raw_obj.get("comment")
+            except Exception:
+                pass
         try:
-            msg = f"Оценка ревью: {int(score)}\n\nКомментарий:\n{str(fedback)}"
+            score_str = str(int(score)) if score is not None else "—"
         except Exception:
-            msg = f"Оценка ревью: {score}\n\nКомментарий:\n{fedback}"
+            score_str = str(score)
+        feedback_str = str(feedback_text or "—")
+        msg = f"Оценка: {score_str}\n\nФинальный отзыв:\n{feedback_str}"
         await update.message.reply_text(msg)
         # завершаем сессию
         delete_user_session(user_id)
@@ -593,7 +631,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload = {"user_id": user_id, "microcase_id": mc_id, "solution": solution}
     # pass pr_url when session was started from URL to allow cached check
     pr_url = session.get("pr_url")
-    if pr_url:
+    if ENABLE_CACHE and pr_url:
         payload["pr_url"] = pr_url
     status, data = await post_json("/check-microcase/", payload)
 

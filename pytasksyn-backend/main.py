@@ -37,6 +37,7 @@ app = FastAPI()
 # Simple in-memory session storage for SSE
 SESSIONS: dict[str, asyncio.Queue] = {}
 LIMIT_CASES: int = 2
+ENABLE_CACHE: bool = False
 
 # In-memory mapping to track session context for solution checking
 # Keyed by user_id → { session_id, session_dir, pr_url, microcase_attempt_dirs: {cid: attempt_dir} }
@@ -75,6 +76,8 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def _cache_microcases(pr_url: str, session_dir: Path) -> None:
+    if not ENABLE_CACHE:
+        return
     pr_hash = _hash_pull_request_url(pr_url)
     storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
     storage_root.mkdir(parents=True, exist_ok=True)
@@ -596,7 +599,7 @@ async def check_microcase(request: CheckMicrocaseRequest):
 
     # 1) Try cache by pr_url if provided
     attempt_dir_path: Optional[Path] = None
-    if request.pr_url:
+    if ENABLE_CACHE and request.pr_url:
         try:
             pr_hash = _hash_pull_request_url(request.pr_url)
             storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
@@ -631,6 +634,9 @@ async def check_microcase(request: CheckMicrocaseRequest):
             except Exception:
                 continue
         if not attempt_dir_str:
+            # Make message clearer if pr_url was provided but id not found in cache
+            if request.pr_url:
+                raise HTTPException(status_code=404, detail="Cached microcase not found for given pr_url and microcase_id")
             raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
         attempt_dir_path = Path(attempt_dir_str)
 
@@ -638,17 +644,18 @@ async def check_microcase(request: CheckMicrocaseRequest):
     success, out, err = _run_student_tests(attempt_dir_path, request.solution)
     if success:
         # Persist student's passing solution under PR cache for later review evaluation
-        try:
-            pr_url = request.pr_url or (SESSION_CONTEXTS.get(request.user_id) or {}).get("pr_url")
-            if pr_url:
-                pr_hash = _hash_pull_request_url(pr_url)
-                storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
-                micro_dir = storage_root / f"microcase_{mc_id_int}"
-                student_dir = micro_dir / "student_solutions"
-                student_dir.mkdir(parents=True, exist_ok=True)
-                (student_dir / f"{request.user_id}.py").write_text(request.solution, encoding="utf-8")
-        except Exception:
-            pass
+        if ENABLE_CACHE:
+            try:
+                pr_url = request.pr_url or (SESSION_CONTEXTS.get(request.user_id) or {}).get("pr_url")
+                if pr_url:
+                    pr_hash = _hash_pull_request_url(pr_url)
+                    storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+                    micro_dir = storage_root / f"microcase_{mc_id_int}"
+                    student_dir = micro_dir / "student_solutions"
+                    student_dir.mkdir(parents=True, exist_ok=True)
+                    (student_dir / f"{request.user_id}.py").write_text(request.solution, encoding="utf-8")
+            except Exception:
+                pass
         return {"status": "passed"}
 
     # On failure, provide brief explanation
