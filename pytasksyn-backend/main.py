@@ -411,6 +411,23 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         
         logger.info(f"Found {len(comments)} comments in PR #{pr_number}")
         
+        # Determine limit_cases from backend config (CLI can override)
+        limit_cases = None
+        try:
+            base_cfg_for_limits = _load_default_config()
+            if isinstance(base_cfg_for_limits, dict):
+                limit_cases = (
+                    ((base_cfg_for_limits.get("generation") or {}).get("limit_cases"))
+                    or ((base_cfg_for_limits.get("limits") or {}).get("limit_cases"))
+                    or base_cfg_for_limits.get("limit_cases")
+                )
+        except Exception:
+            pass
+        
+        # CLI override if provided
+        if LIMIT_CASES is not None:
+            limit_cases = LIMIT_CASES
+        
         # Filter review comments with usable line information
         review_comments = [
             c for c in comments
@@ -424,9 +441,9 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
         # Limit number of review comments to process
-        if LIMIT_CASES and LIMIT_CASES > 0 and len(review_comments) > LIMIT_CASES:
-            review_comments = review_comments[:LIMIT_CASES]
-            logger.info(f"Limiting review comments to {LIMIT_CASES}")
+        if limit_cases and limit_cases > 0 and len(review_comments) > limit_cases:
+            review_comments = review_comments[:limit_cases]
+            logger.info(f"Limiting review comments to {limit_cases} (from config or CLI)")
         
         if not review_comments:
             logger.warning("No review comments found with file paths - cannot generate microcases")
@@ -586,6 +603,14 @@ def start_server_with_ngrok():
     else:
         print("Warning: NGROK_AUTHTOKEN not found in .env file")
     
+    # Print configuration on startup
+    try:
+        config = _load_default_config()
+        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else config.get('limit_cases')
+        print(f"Microcase limit: {effective_limit}")
+    except Exception as e:
+        print(f"⚠️  Could not load config for startup info: {e}")
+    
     # Start ngrok tunnel
     public_url = ngrok.connect(8000)
     print(f"✅ ngrok tunnel established successfully!")
@@ -597,6 +622,14 @@ def start_server_with_ngrok():
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 def start_server():
+    # Print configuration on startup
+    try:
+        config = _load_default_config()
+        effective_limit = LIMIT_CASES if LIMIT_CASES is not None else config.get('limit_cases')
+        print(f"Microcase limit: {effective_limit}")
+    except Exception as e:
+        print(f"⚠️  Could not load config for startup info: {e}")
+    
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
