@@ -18,6 +18,7 @@ import json
 import uuid
 import shutil
 import subprocess
+import hashlib
 
 # Load .env from root folder
 root_dir = Path(__file__).parent.parent
@@ -52,6 +53,7 @@ class CheckMicrocaseRequest(BaseModel):
     user_id: str
     microcase_id: Union[int, str]
     solution: str
+    pr_url: Optional[str] = None
 
 def parse_github_pr_url(url: str) -> Optional[tuple[str, str, str]]:
     """Parse GitHub PR URL to extract owner, repo, and PR number."""
@@ -60,6 +62,89 @@ def parse_github_pr_url(url: str) -> Optional[tuple[str, str, str]]:
     if match:
         return match.groups()
     return None
+
+def _hash_pull_request_url(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+def _write_json(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _cache_microcases(pr_url: str, session_dir: Path) -> None:
+    pr_hash = _hash_pull_request_url(pr_url)
+    storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+    storage_root.mkdir(parents=True, exist_ok=True)
+
+    report_path = Path(session_dir) / "script_report.json"
+    if not report_path.exists():
+        return
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    id_to_row: dict[int, dict] = {}
+    dedup_file = Path(session_dir) / "preprocess" / "code_review_deduplicated.csv"
+    try:
+        with open(dedup_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    cid = int(row.get('comment_id', '0'))
+                except Exception:
+                    continue
+                id_to_row[cid] = row
+    except Exception:
+        pass
+
+    for entry in report:
+        try:
+            cid = int(entry.get("comment_id"))
+        except Exception:
+            continue
+        attempt_dir_str = entry.get("attempt_dir")
+        if not attempt_dir_str:
+            continue
+        attempt_dir = Path(attempt_dir_str)
+        tests_dir = attempt_dir / "tests"
+        if not (attempt_dir.exists() and tests_dir.exists()):
+            continue
+
+        micro_dir = storage_root / f"microcase_{cid}"
+        if micro_dir.exists():
+            shutil.rmtree(micro_dir, ignore_errors=True)
+        micro_dir.mkdir(parents=True, exist_ok=True)
+
+        shutil.copytree(tests_dir, micro_dir / "tests", dirs_exist_ok=True)
+
+        sol_path = attempt_dir / "solution_expert.py"
+        if sol_path.exists():
+            shutil.copy2(sol_path, micro_dir / "solution_expert.py")
+
+        mc_text = ""
+        try:
+            mc_text = (attempt_dir / "microcase.txt").read_text(encoding='utf-8')
+        except Exception:
+            pass
+        row = id_to_row.get(cid, {})
+        if not mc_text:
+            mc_text = row.get('comment') or ""
+        file_path = row.get('file_path') or None
+        line_number = None
+        try:
+            ln = row.get('line_number')
+            line_number = int(ln) if ln is not None and ln != '' else None
+        except Exception:
+            line_number = None
+
+        meta = {
+            "microcase_id": cid,
+            "pull_request_url": pr_url,
+            "file_path": file_path,
+            "line_number": line_number,
+            "microcase_text": mc_text
+        }
+        _write_json(micro_dir / "microcase.json", meta)
 
 async def fetch_pr_comments(owner: str, repo: str, pr_number: str) -> list:
     """Fetch all comments from a GitHub PR."""
@@ -245,6 +330,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         raise HTTPException(status_code=400, detail="Invalid GitHub PR URL format")
     
     owner, repo, pr_number = pr_info
+    pr_url = request.url
     logger.info(f"Parsed PR info - Owner: {owner}, Repo: {repo}, PR: {pr_number}")
     
     try:
@@ -394,6 +480,12 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     }))
                     total_sent += 1
 
+                # Persist latest successful microcases for this PR
+                try:
+                    _cache_microcases(pr_url, session_dir)
+                except Exception:
+                    pass
+
                 await queue.put(("complete", {"message": "Генерация завершена", "total_accepted": total_sent}))
             except Exception as e:
                 prod_logger.error(f"SSE producer failed: {e}")
@@ -490,43 +582,53 @@ def _run_student_tests(attempt_dir: Path, solution_code_text: str) -> tuple[bool
 
 @app.post("/check-microcase/")
 async def check_microcase(request: CheckMicrocaseRequest):
-    # Find session context by user_id
-    ctx = SESSION_CONTEXTS.get(request.user_id)
-    if not ctx:
-        raise HTTPException(status_code=404, detail="No active session for this user")
-
-    # Resolve attempt dir for given microcase id
+    # Resolve attempt dir for given microcase id (prefer cache if pr_url provided)
     try:
         mc_id_int = int(request.microcase_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid microcase_id")
 
-    # Always resolve attempt_dir via script_report.json to avoid stale caches
-    session_dir = ctx.get("session_dir")
-    if not session_dir:
-        raise HTTPException(status_code=409, detail="Session directory not available")
-    report_path = Path(session_dir) / "script_report.json"
-    if not report_path.exists():
-        raise HTTPException(status_code=409, detail="Report not available yet")
-    try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to read report")
-
-    attempt_dir_str = None
-    for entry in report:
+    # 1) Try cache by pr_url if provided
+    attempt_dir_path: Optional[Path] = None
+    if request.pr_url:
         try:
-            if int(entry.get("comment_id")) == mc_id_int:
-                attempt_dir_str = entry.get("attempt_dir")
-                break
+            pr_hash = _hash_pull_request_url(request.pr_url)
+            storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
+            micro_dir = storage_root / f"microcase_{mc_id_int}"
+            if (micro_dir / "tests").exists():
+                attempt_dir_path = micro_dir
         except Exception:
-            continue
-    if not attempt_dir_str:
-        raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+            attempt_dir_path = None
 
-    attempt_dir_path = Path(attempt_dir_str)
+    # 2) Fallback to active session mapping
+    if attempt_dir_path is None:
+        ctx = SESSION_CONTEXTS.get(request.user_id)
+        if not ctx:
+            raise HTTPException(status_code=404, detail="No active session for this user")
+        session_dir = ctx.get("session_dir")
+        if not session_dir:
+            raise HTTPException(status_code=409, detail="Session directory not available")
+        report_path = Path(session_dir) / "script_report.json"
+        if not report_path.exists():
+            raise HTTPException(status_code=409, detail="Report not available yet")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to read report")
+
+        attempt_dir_str = None
+        for entry in report:
+            try:
+                if int(entry.get("comment_id")) == mc_id_int:
+                    attempt_dir_str = entry.get("attempt_dir")
+                    break
+            except Exception:
+                continue
+        if not attempt_dir_str:
+            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+        attempt_dir_path = Path(attempt_dir_str)
+
     autotest_path = attempt_dir_path / "tests" / "test_microcase.py"
-
     success, out, err = _run_student_tests(attempt_dir_path, request.solution)
     if success:
         return {"status": "passed"}
