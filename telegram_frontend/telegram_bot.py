@@ -276,12 +276,12 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
 
 async def show_cases_list(bot: Bot, chat_id: int, session: dict):
     buttons = []
-    for mc in session.get('microcases', []):
-        mc_id = mc.get('microcase_id')
+    for i, mc in enumerate(session.get('microcases', [])):
+        visible_no = i + 1
         fp = mc.get('file_path', '')
         ln = mc.get('line_number', '')
-        label = f"#{mc_id} — {fp}:{ln}"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc:{mc_id}")])
+        label = f"#{visible_no} — {fp}:{ln}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"choose_mc_idx:{i}")])
     if not buttons:
         return
     await bot.send_message(
@@ -301,15 +301,22 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Сессия не найдена. Пришлите ссылку, чтобы начать.")
         return
     data = query.data or ""
-    if not data.startswith("choose_mc:"):
-        return
-    mc_id = data.split(":", 1)[1]
     microcases = session.get('microcases', [])
     idx = None
-    for i, mc in enumerate(microcases):
-        if str(mc.get('microcase_id')) == str(mc_id):
-            idx = i
-            break
+
+    if data.startswith("choose_mc_idx:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            idx = None
+    elif data.startswith("choose_mc:"):
+        mc_id = data.split(":", 1)[1]
+        for i, mc in enumerate(microcases):
+            if str(mc.get('microcase_id')) == str(mc_id):
+                idx = i
+                break
+    else:
+        return
     if idx is None:
         await query.edit_message_text("Микрокейс не найден.")
         return
@@ -520,7 +527,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc:"))
+    app.add_handler(CallbackQueryHandler(handle_choose_mc, pattern="^choose_mc"))
     # Документы (файлы с кодом)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     # Текстовые сообщения: ссылки и решения
