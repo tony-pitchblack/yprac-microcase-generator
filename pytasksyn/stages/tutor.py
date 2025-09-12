@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from pytasksyn.utils.logging_utils import get_logger
 
 
 class TutorStage:
@@ -20,28 +21,29 @@ class TutorStage:
     
     def run(self, expert_results: Dict[int, Dict]) -> Dict[int, Dict]:
         """Run the tutor stage to validate microcases"""
-        print("Starting tutor stage...")
+        logger = get_logger()
+        logger.processing("Starting tutor stage (tutor)")
         
         results = {}
         successful_validations = 0
         
         for comment_id, expert_result in expert_results.items():
-            if not expert_result['success']:
-                print(f"  Skipping comment {comment_id} (expert stage failed)")
+            if not expert_result.get('success'):
+                logger.info(f"Tutor: skipping comment {comment_id} (expert stage failed)")
                 continue
             
-            print(f"  Validating comment {comment_id}")
+            logger.info(f"Tutor: validating comment {comment_id}")
             result = self._validate_microcase(comment_id, expert_result)
             results[comment_id] = result
             
             if result['accepted']:
                 successful_validations += 1
-                print(f"    ✓ Microcase accepted (score: {result['score']:.2f})")
+                logger.success(f"Tutor: accepted (score: {result['score']:.2f})")
             else:
-                print(f"    ✗ Microcase rejected (score: {result['score']:.2f})")
+                logger.warning(f"Tutor: rejected (score: {result['score']:.2f})")
         
         total_validated = len([r for r in expert_results.values() if r['success']])
-        print(f"Tutor stage completed: {successful_validations}/{total_validated} microcases accepted")
+        logger.stage_complete("tutor", {"accepted": f"{successful_validations}/{total_validated}"})
         
         return results
     
@@ -60,13 +62,22 @@ class TutorStage:
             'successful_attempt_dir': None
         }
         
+        logger = get_logger()
         # Load microcase description
         microcase_file = expert_attempt_dir / "microcase.txt"
-        with open(microcase_file, 'r', encoding='utf-8') as f:
-            microcase = f.read()
+        try:
+            with open(microcase_file, 'r', encoding='utf-8') as f:
+                microcase = f.read()
+        except Exception as e:
+            logger.error(f"Tutor: failed to read microcase for comment {comment_id}: {e}")
+            return result
         
-        max_attempts = self.config['tutor']['max_solution_attempts']
-        acceptance_threshold = self.config['tutor']['acceptance_threshold']
+        try:
+            max_attempts = self.config['tutor']['max_solution_attempts']
+            acceptance_threshold = self.config['tutor']['acceptance_threshold']
+        except Exception as e:
+            logger.error(f"Tutor: missing tutor config (max_solution_attempts/acceptance_threshold): {e}")
+            return result
         
         for attempt in range(max_attempts):
             start_time = time.time()
@@ -96,10 +107,12 @@ class TutorStage:
     def _generate_tutor_validation(self, microcase: str, expert_attempt_dir: Path, 
                                  attempt_dir: Path, result: Dict) -> bool:
         """Generate tutor solution and review for one validation attempt"""
+        logger = get_logger()
         try:
             # Generate tutor solution
             tutor_solution = self._generate_tutor_solution(microcase)
             if not tutor_solution:
+                logger.warning("Tutor: empty solution generated")
                 return False
             
             # Save tutor solution
@@ -108,12 +121,12 @@ class TutorStage:
                 f.write(tutor_solution)
             
             # Verify tutor solution passes expert tests
-            if not self._verify_tutor_solution(expert_attempt_dir, solution_file):
-                print(f"      Tutor solution failed expert tests")
+            if not self._verify_tutor_solution(expert_attempt_dir, solution_file, attempt_dir):
+                logger.warning("Tutor: solution failed expert tests")
                 return False
             
             # Generate educational review
-            review_data = self._generate_educational_review(microcase)
+            review_data = self._generate_educational_review(microcase, attempt_dir)
             if not review_data:
                 return False
             
@@ -129,7 +142,7 @@ class TutorStage:
             return True
             
         except Exception as e:
-            print(f"      Tutor validation attempt failed: {e}")
+            logger.error(f"Tutor: validation attempt failed: {e}")
             return False
     
     def _generate_tutor_solution(self, microcase: str) -> str:
@@ -152,8 +165,9 @@ Focus on clarity and educational value:"""
         
         return response.strip()
     
-    def _verify_tutor_solution(self, expert_attempt_dir: Path, tutor_solution_file: Path) -> bool:
+    def _verify_tutor_solution(self, expert_attempt_dir: Path, tutor_solution_file: Path, attempt_dir: Path) -> bool:
         """Verify tutor solution passes the expert's test suite"""
+        logger = get_logger()
         try:
             expert_tests_dir = expert_attempt_dir / "tests"
             if not tutor_solution_file.exists() or not expert_tests_dir.exists():
@@ -169,16 +183,27 @@ Focus on clarity and educational value:"""
                 env["PYTHONPATH"] = f"{str(temp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
                 result = subprocess.run([
-                    sys.executable, "-m", "pytest", "-v", "tests/"
+                    sys.executable, "-m", "pytest", "-q", "tests/"
                 ], cwd=expert_attempt_dir, env=env, capture_output=True, text=True)
+
+                if result.returncode != 0:
+                    logger.test_result(False, "tutor_solution_vs_expert_tests")
+                    # Write detailed logs next to attempt_dir for easier debugging
+                    try:
+                        (attempt_dir / "test_stdout.txt").write_text(result.stdout or "", encoding='utf-8')
+                        (attempt_dir / "test_stderr.txt").write_text(result.stderr or "", encoding='utf-8')
+                    except Exception:
+                        pass
+                else:
+                    logger.test_result(True, "tutor_solution_vs_expert_tests")
 
                 return result.returncode == 0
                 
         except Exception as e:
-            print(f"      Error verifying tutor solution: {e}")
+            logger.error(f"Tutor: error verifying solution: {e}")
             return False
     
-    def _generate_educational_review(self, microcase: str) -> Optional[Dict]:
+    def _generate_educational_review(self, microcase: str, attempt_dir: Path) -> Optional[Dict]:
         """Generate educational review and scoring of the microcase"""
         prompt_template = """As an educational tutor, evaluate this microcase for learning effectiveness.
 
@@ -208,6 +233,7 @@ JSON Response:"""
         chain = prompt | self.tutor_llm | self.parser
         response = chain.invoke({"microcase": microcase})
         
+        logger = get_logger()
         try:
             # Try to parse as JSON
             review_data = json.loads(response.strip())
@@ -225,8 +251,11 @@ JSON Response:"""
             return review_data
             
         except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"      Failed to parse tutor review JSON: {e}")
-            print(f"      Raw response: {response}")
+            logger.warning(f"Tutor: failed to parse review JSON: {e}")
+            try:
+                (attempt_dir / "tutor_review_raw.txt").write_text(response, encoding='utf-8')
+            except Exception:
+                pass
             
             # Fallback: extract score from text if possible
             try:

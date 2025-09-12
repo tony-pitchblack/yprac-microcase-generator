@@ -270,9 +270,21 @@ def run_pipeline(config=None, session_dir=None):
         tutor_llm = None
         student_llm = None
         if config.get('stages', {}).get('enable_tutor', False):
-            tutor_llm = create_llm(config['models']['tutor'])
+            try:
+                tutor_model_cfg = (config.get('models') or {}).get('tutor')
+                if not isinstance(tutor_model_cfg, dict) or not tutor_model_cfg.get('provider') or not tutor_model_cfg.get('model_name'):
+                    logger.error("Tutor stage enabled but models.tutor is missing or incomplete (provider/model_name)")
+                else:
+                    tutor_llm = create_llm(tutor_model_cfg)
+            except KeyError as e:
+                logger.error(f"Tutor stage initialization failed due to missing config key: {e}")
+            except Exception as e:
+                logger.error(f"Tutor LLM initialization failed: {e}")
         if config.get('stages', {}).get('enable_student', False):
-            student_llm = create_llm(config['models']['student'])
+            try:
+                student_llm = create_llm(config['models']['student'])
+            except Exception as e:
+                logger.error(f"Student LLM initialization failed: {e}")
         
         logger.info(f"Каталог сессии: {session_dir}")
         logger.info(f"Модель препроцессинга: {config['models']['preprocessor']['provider']}/{config['models']['preprocessor']['model_name']}")
