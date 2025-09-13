@@ -4,6 +4,7 @@
 # Project-related
 tmp/
 pytasksyn/config.yml
+*config.yml
 
 # LLMs / agents
 .claude
