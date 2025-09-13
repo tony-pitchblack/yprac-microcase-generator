@@ -21,3 +21,4 @@ output:
   base_output_dir: tmp/pytasksyn-backend
 
 
+limit_cases: 1

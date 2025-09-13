@@ -249,10 +249,11 @@ async def handle_sse_event(event_type: str, data: dict, user_id: str, bot: Bot):
             
         elif event_type == 'microcase':
             # New microcase received
-            # Ensure we always have a visible id for the UI
-            mc_visible_id = data.get('microcase_id') or (len(session['microcases']) + 1)
+            backend_id = data.get('microcase_id')
+            visible_no = len(session['microcases']) + 1
             microcase = {
-                'microcase_id': int(mc_visible_id),
+                'microcase_id': int(backend_id) if backend_id is not None else None,
+                'visible_no': visible_no,
                 'file_path': data.get('file_path'),
                 'line_number': data.get('line_number'),
                 'microcase': data.get('microcase') or data.get('comment'),
@@ -320,7 +321,10 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
     line_number = microcase.get("line_number", "")
     body = microcase.get("microcase", "")
     
-    txt_parts.append(f"📌 **Микрокейс #{mc_id}**")
+    # Prefer visible number for UI if present
+    visible_no = microcase.get("visible_no")
+    header_id = visible_no if visible_no is not None else mc_id
+    txt_parts.append(f"📌 **Микрокейс #{header_id}**")
     
     if file_path:
         txt_parts.append(f"📄 Файл: `{file_path}:{line_number}`")
@@ -351,7 +355,7 @@ async def send_microcase_message_by_bot(bot: Bot, chat_id: int, microcase: dict)
 async def show_cases_list(bot: Bot, chat_id: int, session: dict):
     buttons = []
     for i, mc in enumerate(session.get('microcases', [])):
-        visible_no = i + 1
+        visible_no = mc.get('visible_no') or (i + 1)
         fp = mc.get('file_path', '')
         ln = mc.get('line_number', '')
         loc = f"{fp}:{ln}" if fp else ""
@@ -401,11 +405,13 @@ async def handle_choose_mc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Edit the list message into a microcase card (avoid extra message)
     txt_parts = []
     mc_id = mc.get("microcase_id") or mc.get("id") or mc.get("mc_id") or "<unknown-id>"
+    visible_no = mc.get("visible_no")
     file_path = mc.get("file_path", "")
     line_number = mc.get("line_number", "")
     body = mc.get("microcase", "")
 
-    txt_parts.append(f"📌 **Микрокейс #{mc_id}**")
+    header_id = visible_no if visible_no is not None else mc_id
+    txt_parts.append(f"📌 **Микрокейс #{header_id}**")
     if file_path:
         txt_parts.append(f"📄 Файл: `{file_path}:{line_number}`")
     if body:
@@ -535,7 +541,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Инструкции:\n"
         "- Пришли ссылку (http...) — начнём генерацию микро-кейсов.\n"
         "- После получения микро-кейса пришли решение простым текстом (код/ответ).\n"
-        "- Когда все микро-кейсы пройдены — тебя попросят написать ревью/обоснование.\n"
+        "- После прохождения всех микро-кейсов сессия завершится.\n"
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -578,63 +584,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Я не вижу активной сессии. Пришли ссылку на репозиторий (http...) чтобы начать.")
         return
     
-    # если ждём ревью
+    # режим без ревью: если ранее ожидалось ревью, просто завершаем сессию
     if session.get("awaiting_review"):
-        review_text = text
-        await update.message.reply_text("Отправляю ревью на оценку...")
-        payload = {"user_id": user_id, "review": review_text}
-        pr_url = session.get("pr_url")
-        if pr_url:
-            payload["pr_url"] = pr_url
-        status, data = await post_json("/evaluate-review/", payload)
-        if status != 200:
-            await update.message.reply_text(f"Ошибка от backend при оценке ревью: HTTP {status}. Подробнее: {data}")
-            return
-        # показать результат (надёжный парсинг JSON)
-        score = data.get("score")
-        feedback_text = data.get("feedback") or data.get("fedback") or data.get("comment")
-        if (score is None or feedback_text is None) and data.get("_raw_text"):
-            try:
-                raw_obj = json.loads(data.get("_raw_text") or "{}")
-                if score is None:
-                    score = raw_obj.get("score")
-                if feedback_text is None:
-                    feedback_text = raw_obj.get("feedback") or raw_obj.get("fedback") or raw_obj.get("comment")
-            except Exception:
-                pass
-        # If feedback_text accidentally contains a JSON object string, extract only the `feedback` field
-        if isinstance(feedback_text, str):
-            fb_str = feedback_text.strip()
-            if (fb_str.startswith("{") and fb_str.endswith("}")) or (fb_str.startswith("[") and fb_str.endswith("]")):
-                try:
-                    fb_obj = json.loads(fb_str)
-                    feedback_text = fb_obj.get("feedback") or fb_obj.get("fedback") or fb_obj
-                except Exception:
-                    pass
-        try:
-            score_str = str(int(score)) if score is not None else "—"
-        except Exception:
-            score_str = str(score)
-        feedback_str = str(feedback_text or "—")
-        # Show only the final feedback content for the review section
-        msg = f"Оценка: {score_str}\n\nФинальный отзыв:\n{feedback_str}"
-        await update.message.reply_text(msg)
-        # завершаем сессию
         delete_user_session(user_id)
-        await update.message.reply_text("Сессия завершена. Если хочешь — пришли новую ссылку на репозиторий.")
+        await update.message.reply_text("Все микрокейсы пройдены. Сессия завершена. Пришли новую ссылку, чтобы начать заново.")
         return
 
     # иначе — это решение на текущий микро-кейс
     current_index = session.get("current", 0)
     microcases = session.get("microcases", [])
     if current_index >= len(microcases):
-        await update.message.reply_text("Все микро-кейсы уже обработаны. Напиши ревью (почему ты так решил).")
-        session["awaiting_review"] = True
-        save_user_session(user_id, session)
+        delete_user_session(user_id)
+        await update.message.reply_text("Все микрокейсы уже обработаны. Сессия завершена. Пришлите новую ссылку на репозиторий.")
         return
 
     mc = microcases[current_index]
-    mc_id = mc.get("microcase_id") or mc.get("id") or mc.get("mc_id") or f"idx_{current_index}"
+    mc_id = mc.get("microcase_id")
+    if mc_id is None:
+        await update.message.reply_text("Ошибка: отсутствует идентификатор микрокейса. Попробуйте заново сгенерировать.")
+        return
     solution = text  # берем весь текст как решение
 
     await update.message.reply_text("⚙️ Отправляю решение на проверку...")
@@ -666,14 +634,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             next_mc = microcases[session["current"]]
             await send_microcase_message(update, next_mc)
         else:
-            # все решены
-            session["awaiting_review"] = True
-            save_user_session(user_id, session)
-            await update.message.reply_text("Все микрокейсы пройдены!")
-            await update.message.reply_text(
-                "🎉 Ты решил все микро-кейсы! Напиши, пожалуйста, краткое ревью/пояснение: "
-                "почему ты так решил, что вынес из решения и т.п. Отправь текст в ответ."
-            )
+            # все решены — финализируем без ревью
+            delete_user_session(user_id)
+            await update.message.reply_text("Все микрокейсы пройдены! Сессия завершена. Пришлите новую ссылку, чтобы начать заново.")
         return
     else:
         # не прошли: выводим информацию от backend если есть

@@ -39,6 +39,7 @@ app = FastAPI()
 SESSIONS: dict[str, asyncio.Queue] = {}
 LIMIT_CASES: int = 2
 ENABLE_CACHE: bool = False
+ENABLE_REVIEW_REQUEST: bool = False
 
 # In-memory mapping to track session context for solution checking
 # Keyed by user_id → { session_id, session_dir, pr_url, microcase_attempt_dirs: {cid: attempt_dir} }
@@ -399,6 +400,16 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
     pr_url = request.url
     logger.info(f"Parsed PR info - Owner: {owner}, Repo: {repo}, PR: {pr_number}")
     
+    # Load base config to determine limit_cases early
+    base_config = _load_default_config()
+    try:
+        lc = base_config.get("limit_cases") if isinstance(base_config, dict) else None
+        limit_cases = int(lc) if lc is not None else None
+    except Exception:
+        limit_cases = None
+    if limit_cases is None:
+        limit_cases = LIMIT_CASES
+
     try:
         # Fetch PR details for head repo/sha (supports forks)
         pr_details = await fetch_pr_details(owner, repo, pr_number)
@@ -423,10 +434,10 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         ]
         logger.info(f"Found {len(review_comments)} review comments with file paths")
         
-        # Limit number of review comments to process
-        if LIMIT_CASES and LIMIT_CASES > 0 and len(review_comments) > LIMIT_CASES:
-            review_comments = review_comments[:LIMIT_CASES]
-            logger.info(f"Limiting review comments to {LIMIT_CASES}")
+        # Limit number of review comments to process (from config)
+        if limit_cases and limit_cases > 0 and len(review_comments) > limit_cases:
+            review_comments = review_comments[:limit_cases]
+            logger.info(f"Limiting review comments to {limit_cases}")
         
         if not review_comments:
             logger.warning("No review comments found with file paths - cannot generate microcases")
@@ -458,8 +469,7 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
         # Create CSV from PR comments
         review_csv = await create_review_csv_from_comments(review_comments, temp_dir)
 
-        # Load default config and apply backend overrides
-        base_config = _load_default_config()
+        # Apply backend overrides using previously loaded base_config
         config = _apply_backend_overrides(base_config, project_dir, review_csv)
         # Persist effective config for this session
         try:
@@ -510,6 +520,10 @@ async def generate_microcases(request: GenerateMicrocaseRequest):
                     if not er.get('success'):
                         continue
                     attempt_dir = Path(er['successful_attempt_dir'])
+                    try:
+                        SESSION_CONTEXTS.get(request.user_id, {}).setdefault("microcase_attempt_dirs", {})[int(cid)] = str(attempt_dir)
+                    except Exception:
+                        pass
                     mc_path = attempt_dir / "microcase.txt"
                     try:
                         mc_text = mc_path.read_text(encoding='utf-8')
@@ -610,21 +624,21 @@ def _run_student_tests(attempt_dir: Path, solution_code_text: str) -> tuple[bool
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            tests_dir = Path(attempt_dir) / "tests"
+            tests_dir = (Path(attempt_dir) / "tests").resolve()
             if not tests_dir.exists():
                 return False, "", "Tests directory not found"
 
             # Write student's solution with expected module name
             (tmp_path / "solution_expert.py").write_text(solution_code_text, encoding="utf-8")
 
-            # Ensure pytest can import solution_expert from the temp dir
+            # Ensure pytest imports student's solution first
             env = os.environ.copy()
-            env["PYTHONPATH"] = f"{str(tmp_path)}{os.pathsep}{env.get('PYTHONPATH', '')}"
+            env["PYTHONPATH"] = f"{str(tmp_path)}{os.pathsep}{str(Path(attempt_dir).resolve())}{os.pathsep}{env.get('PYTHONPATH', '')}"
 
-            # Run pytest against the session tests directory
+            # Run pytest using temp dir as CWD so '' points to tmp_path
             result = subprocess.run([
-                sys.executable, "-m", "pytest", "-q", "tests/"
-            ], cwd=attempt_dir, env=env, capture_output=True, text=True)
+                sys.executable, "-m", "pytest", "-q", str(tests_dir)
+            ], cwd=tmp_path, env=env, capture_output=True, text=True)
 
             return result.returncode == 0, result.stdout, result.stderr
     except Exception as e:
@@ -656,31 +670,42 @@ async def check_microcase(request: CheckMicrocaseRequest):
         ctx = SESSION_CONTEXTS.get(request.user_id)
         if not ctx:
             raise HTTPException(status_code=404, detail="No active session for this user")
-        session_dir = ctx.get("session_dir")
-        if not session_dir:
-            raise HTTPException(status_code=409, detail="Session directory not available")
-        report_path = Path(session_dir) / "script_report.json"
-        if not report_path.exists():
-            raise HTTPException(status_code=409, detail="Report not available yet")
+        # Try in-memory mapping first for immediate availability
         try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
+            mapped = (ctx.get("microcase_attempt_dirs") or {}).get(mc_id_int)
+            if mapped:
+                mapped_path = Path(mapped)
+                if (mapped_path / "tests").exists():
+                    attempt_dir_path = mapped_path
         except Exception:
-            raise HTTPException(status_code=500, detail="Failed to read report")
-
-        attempt_dir_str = None
-        for entry in report:
+            pass
+        # Fallback to reading report if mapping not found
+        if attempt_dir_path is None:
+            session_dir = ctx.get("session_dir")
+            if not session_dir:
+                raise HTTPException(status_code=409, detail="Session directory not available")
+            report_path = Path(session_dir) / "script_report.json"
+            if not report_path.exists():
+                raise HTTPException(status_code=409, detail="Report not available yet")
             try:
-                if int(entry.get("comment_id")) == mc_id_int:
-                    attempt_dir_str = entry.get("attempt_dir")
-                    break
+                report = json.loads(report_path.read_text(encoding="utf-8"))
             except Exception:
-                continue
-        if not attempt_dir_str:
-            # Make message clearer if pr_url was provided but id not found in cache
-            if request.pr_url:
-                raise HTTPException(status_code=404, detail="Cached microcase not found for given pr_url and microcase_id")
-            raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
-        attempt_dir_path = Path(attempt_dir_str)
+                raise HTTPException(status_code=500, detail="Failed to read report")
+
+            attempt_dir_str = None
+            for entry in report:
+                try:
+                    if int(entry.get("comment_id")) == mc_id_int:
+                        attempt_dir_str = entry.get("attempt_dir")
+                        break
+                except Exception:
+                    continue
+            if not attempt_dir_str:
+                # Make message clearer if pr_url was provided but id not found in cache
+                if request.pr_url:
+                    raise HTTPException(status_code=404, detail="Cached microcase not found for given pr_url and microcase_id")
+                raise HTTPException(status_code=409, detail="Tests for this microcase are not available yet")
+            attempt_dir_path = Path(attempt_dir_str)
 
     autotest_path = attempt_dir_path / "tests" / "test_microcase.py"
     success, out, err = _run_student_tests(attempt_dir_path, request.solution)
@@ -713,136 +738,7 @@ async def check_microcase(request: CheckMicrocaseRequest):
 
 @app.post("/evaluate-review/")
 async def evaluate_review(request: EvaluateReviewRequest):
-    # Determine PR URL
-    pr_url = request.pr_url or (SESSION_CONTEXTS.get(request.user_id) or {}).get("pr_url")
-    if not pr_url:
-        raise HTTPException(status_code=400, detail="pr_url is required (not found in session)")
-
-    pr_hash = _hash_pull_request_url(pr_url)
-    storage_root = Path("tmp") / "pytasksyn-backend" / "microcase_storage" / pr_hash
-    if not storage_root.exists():
-        raise HTTPException(status_code=404, detail="No cached microcases for this PR")
-
-    # Load all microcases and expert solutions
-    all_microcases: list[dict] = []
-    expert_solutions: dict[int, str] = {}
-    student_solutions: dict[int, str] = {}
-
-    try:
-        for mc_dir in sorted(storage_root.glob("microcase_*")):
-            try:
-                mc_json = mc_dir / "microcase.json"
-                meta = json.loads(mc_json.read_text(encoding="utf-8")) if mc_json.exists() else {}
-            except Exception:
-                meta = {}
-            try:
-                mc_id = int(meta.get("microcase_id")) if meta.get("microcase_id") is not None else None
-            except Exception:
-                mc_id = None
-            all_microcases.append({
-                "microcase_id": mc_id,
-                "file_path": meta.get("file_path"),
-                "line_number": meta.get("line_number"),
-                "microcase": meta.get("microcase_text") or ""
-            })
-            # Expert solution
-            exp_path = mc_dir / "solution_expert.py"
-            if mc_id is not None and exp_path.exists():
-                try:
-                    expert_solutions[mc_id] = exp_path.read_text(encoding="utf-8")
-                except Exception:
-                    pass
-            # Student solution for this user (if exists)
-            stu_path = mc_dir / "student_solutions" / f"{request.user_id}.py"
-            if mc_id is not None and stu_path.exists():
-                try:
-                    student_solutions[mc_id] = stu_path.read_text(encoding="utf-8")
-                except Exception:
-                    pass
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load microcases: {e}")
-
-    # Build prompt context
-    solved_ids = sorted(k for k in student_solutions.keys())
-    if not solved_ids:
-        raise HTTPException(status_code=409, detail="No solved microcases found for this user")
-
-    def _fmt_cases(cases: list[dict]) -> str:
-        parts = []
-        for c in cases:
-            cid = c.get("microcase_id")
-            body = c.get("microcase") or ""
-            fp = c.get("file_path") or ""
-            ln = c.get("line_number")
-            loc = f"{fp}:{ln}" if fp else ""
-            parts.append(f"- ID {cid} {('('+loc+')') if loc else ''}:\n{body}\n")
-        return "\n".join(parts)
-
-    def _fmt_code_map(code_map: dict[int, str], title: str) -> str:
-        lines = [title]
-        for cid in sorted(code_map.keys()):
-            code = code_map[cid]
-            lines.append(f"[ID {cid}]\n```python\n{code}\n```\n")
-        return "\n".join(lines)
-
-    all_cases_text = _fmt_cases(all_microcases)
-    expert_code_text = _fmt_code_map({cid: expert_solutions.get(cid, '') for cid in sorted(expert_solutions.keys())}, "Эталонные решения (эксперт):")
-    student_code_text = _fmt_code_map({cid: student_solutions[cid] for cid in solved_ids}, "Решения студента (только решённые):")
-
-    prompt = (
-        "Ты — преподаватель программирования. Оцени, насколько хорошо студент усвоил материал по решённым им микро-кейсам.\n"
-        "Даны:\n"
-        "1) Все микрокейсы (для контекста):\n" + all_cases_text + "\n\n"
-        "2) Эталонные решения эксперта (могут отсутствовать для некоторых кейсов):\n" + expert_code_text + "\n\n"
-        "3) Решения студента по тем кейсам, которые он прошёл тестами:\n" + student_code_text + "\n\n"
-        "4) Текстовое ревью студента по своим решениям:\n" + (request.review or "") + "\n\n"
-        "Оцени понимание по шкале 0..100, где 0 — не понял, 100 — отлично понял.\n"
-        "Ответь строго JSON c двумя полями: {\"score\": <целое 0..100>, \"fedback\": <краткий комментарий>}"
-    )
-
-    # Create LLM instance for evaluation
-    model_provider = os.getenv("REVIEW_PROVIDER", "yandex")
-    model_name = os.getenv("REVIEW_MODEL", "yandexgpt-lite")
-    try:
-        llm = create_llm({"provider": model_provider, "model_name": model_name})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM init failed: {e}")
-
-    # Invoke LLM
-    try:
-        response = None
-        try:
-            response = llm.invoke(prompt)  # type: ignore
-        except Exception:
-            # Fallback to callable interface
-            response = llm(prompt)  # type: ignore
-        if hasattr(response, "content"):
-            text = getattr(response, "content")
-        else:
-            text = str(response)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
-
-    # Parse JSON/score
-    score: Optional[int] = None
-    fedback: Optional[str] = None
-    try:
-        obj = json.loads(text)
-        score = int(obj.get("score"))
-        fedback = obj.get("fedback") or obj.get("feedback") or obj.get("comment")
-    except Exception:
-        # Try to extract first integer 0..100
-        try:
-            m = re.search(r"\b(100|\d{1,2})\b", text)
-            if m:
-                score = int(m.group(1))
-            fedback = text.strip()
-        except Exception:
-            pass
-    if score is None:
-        raise HTTPException(status_code=500, detail="Failed to parse score from LLM response")
-    score = max(0, min(100, score))
-    return {"score": score, "fedback": (fedback or "").strip()}
+    raise HTTPException(status_code=404, detail="Review stage is disabled")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FastAPI microcase generator backend")
